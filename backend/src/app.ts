@@ -58,7 +58,21 @@ export type AppDeps = {
   reminderLeadHours?: number;
   emailService?: EmailService;
   adminWalletAddresses?: string[];
+  /**
+   * #771: when set, delayed/retryable work (draw-proof generation) runs on the
+   * background worker instead of inline in request handlers.
+   */
+  jobStore?: JobStore;
+  jobWorkerPollIntervalMs?: number;
 };
+
+declare module "fastify" {
+  interface FastifyInstance {
+    /** Present only when `jobStore` was provided; call `.start()` to begin polling. */
+    jobWorker?: JobWorker;
+    jobQueue?: JobQueue;
+  }
+}
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const loggerInstance = deps.logger || createLogger("silent");
@@ -66,6 +80,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     logger: loggerInstance as any,
     disableRequestLogging: true,
   });
+
+  // #770: operation telemetry events share the app logger.
+  configureTelemetry({ logger: loggerInstance });
 
   // Register global rate limiting with Redis store if available
   // Note: @fastify/rate-limit 11.x requires Fastify 5.x; skipped for Fastify 4.x (#567)
@@ -137,12 +154,39 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const schemaVersionSvc = new SchemaVersionService(deps.prisma);
   const auditSvc = new AuditService(deps.prisma);
 
+  const jobQueue = deps.jobStore ? new JobQueue({ store: deps.jobStore }) : undefined;
+  if (jobQueue) {
+    const worker = new JobWorker({
+      queue: jobQueue,
+      handlers: createJobHandlers({ drawProofs: drawProofSvc }),
+      logger: loggerInstance,
+      pollIntervalMs: deps.jobWorkerPollIntervalMs
+    });
+    app.decorate("jobQueue", jobQueue);
+    app.decorate("jobWorker", worker);
+    app.addHook("onClose", async () => {
+      await worker.stop();
+    });
+  }
+
   svc.onActionConfirmed((actionId, actionType) => {
-    if (actionType === "select_winner") {
-      drawProofSvc.generateProof({ actionId }).catch((err) => {
-        deps.logger?.error({ err, actionId }, "draw proof generation failed");
-      });
+    if (actionType !== "select_winner") return;
+    if (jobQueue) {
+      // Retryable and observable: failures land in the dead-letter state with context.
+      jobQueue
+        .enqueue({
+          type: JOB_TYPES.DRAW_PROOF_GENERATE,
+          payload: { actionId },
+          idempotencyKey: drawProofJobKey(actionId)
+        })
+        .catch((err) => {
+          deps.logger?.error({ err, actionId }, "failed to enqueue draw proof job");
+        });
+      return;
     }
+    drawProofSvc.generateProof({ actionId }).catch((err) => {
+      deps.logger?.error({ err, actionId }, "draw proof generation failed");
+    });
   });
 
   // API key guard for external-service endpoints (#273).
@@ -163,7 +207,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(schemaVersionRoutes(schemaVersionSvc));
   app.register(internalRoutes(svc, deps.internalSecret, new TransactionTraceService(deps.prisma)));
   app.register(reconciliationRoutes(deps.prisma, deps.internalSecret));
-  app.register(metricsRoutes(metricsSvc));
+  if (jobQueue) app.register(jobsRoutes(jobQueue, deps.internalSecret));
   app.register(usersRoutes, { prefix: "/api/users", prisma: deps.prisma });
   app.register(metricsRoutes(metricsSvc, apiKeyGuard));
   app.register(prometheusRoutes);
