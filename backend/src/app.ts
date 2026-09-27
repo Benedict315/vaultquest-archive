@@ -31,7 +31,7 @@ import type { Logger } from "pino";
 import type { CacheService } from "./services/cacheService.js";
 import { walletAuthRoutes } from "./routes/walletAuth.js";
 import { WalletAuthService } from "./services/walletAuth.js";
-import { createRequireAdminSession } from "./middleware/auth.js";
+import { requirePermission, walletSessionResolver } from "./middleware/rbac.js";
 import { transactionMetricsRoutes } from "./routes/transactionMetrics.js";
 import { CategoryService } from "./services/categoryService.js";
 import { categoriesRoutes } from "./routes/categories.js";
@@ -40,11 +40,10 @@ import { notificationsRoutes } from "./routes/notifications.js";
 import { DashboardAggregateService } from "./services/dashboardAggregateService.js";
 import { dashboardAggregatesRoutes } from "./routes/dashboardAggregates.js";
 import { EmailService } from "./services/emailService.js";
-import { configureTelemetry } from "./services/telemetry.js";
-import type { JobStore } from "./worker/jobStore.js";
-import { JobQueue, JobWorker } from "./worker/jobWorker.js";
-import { createJobHandlers, drawProofJobKey, JOB_TYPES } from "./worker/handlers.js";
-import { jobsRoutes } from "./routes/jobs.js";
+import { DataExportService } from "./services/dataExport.js";
+import { DataImportService } from "./services/dataImport.js";
+import { exportsRoutes } from "./routes/exports.js";
+import { importsRoutes } from "./routes/imports.js";
 
 export type AppDeps = {
   prisma: PrismaClient;
@@ -195,7 +194,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const apiKeyGuard = requireApiKey(deps.apiKey);
 
   const walletAuthSvc = new WalletAuthService(deps.prisma);
-  const requireAdminSession = createRequireAdminSession(walletAuthSvc, deps.adminWalletAddresses ?? []);
+  const walletPrincipal = walletSessionResolver(walletAuthSvc, deps.adminWalletAddresses ?? []);
   const categorySvc = new CategoryService(deps.prisma, deps.cacheService, deps.categoriesCacheTtlSeconds);
   const notificationSvc = new NotificationService(deps.prisma, deps.reminderLeadHours);
   const dashboardAggregateSvc = new DashboardAggregateService(deps.prisma);
@@ -216,8 +215,25 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(transactionMetricsRoutes(deps.prisma, apiKeyGuard));
   app.register(categoriesRoutes(categorySvc, apiKeyGuard));
   app.register(notificationsRoutes(notificationSvc));
-  app.register(auditRoutes(auditSvc, requireAdminSession));
+  app.register(
+    auditRoutes(auditSvc, {
+      read: requirePermission("admin.audit.read", [walletPrincipal]),
+      write: requirePermission("admin.audit.write", [walletPrincipal]),
+      export: requirePermission("admin.audit.export", [walletPrincipal]),
+    }),
+  );
   app.register(dashboardAggregatesRoutes(dashboardAggregateSvc, apiKeyGuard));
+
+  // Wallet-scoped data portability (#772, #773). Authorization is enforced by
+  // the permission guards and by the services' own wallet-scope checks.
+  const exportSvc = new DataExportService({
+    listActions: ({ walletAddress, cursor, limit }) => svc.listActions({ walletAddress, cursor, limit }),
+    listSavedPools: (wallet, cursor, limit) => savedPoolsSvc.listSavedPools(wallet, cursor, limit),
+  });
+  app.register(exportsRoutes(exportSvc, requirePermission("own.data.export", [walletPrincipal])));
+  app.register(
+    importsRoutes(new DataImportService(savedPoolsSvc), requirePermission("own.data.import", [walletPrincipal])),
+  );
 
   // Central Error Handler Middleware
   app.setErrorHandler(errorHandler);
