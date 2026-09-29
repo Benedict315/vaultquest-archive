@@ -11,7 +11,9 @@ import type { z } from "zod";
 export const internalRoutes = (
   svc: LedgerService,
   secret: string,
-  traces: TransactionTraceService
+  traces: TransactionTraceService,
+  /** #812: issue the confirmed/reverted receipt once the indexer matches a tx. */
+  hooks: { onReconciled?: (txHash: string) => Promise<unknown> } = {}
 ): FastifyPluginAsync =>
   async (app) => {
     const service = serviceSecretResolver(secret);
@@ -32,6 +34,13 @@ export const internalRoutes = (
         { txHash: body.tx_hash, eventId: body.soroban_event_id, matched: result.matched },
         "internal reconcile applied"
       );
+      if (result.matched && hooks.onReconciled) {
+        try {
+          await hooks.onReconciled(body.tx_hash);
+        } catch (err) {
+          req.log.error({ err, txHash: body.tx_hash }, "reconcile hook failed");
+        }
+      }
       if (!result.matched) {
         reply.status(202);
         return ok({ parked: true });

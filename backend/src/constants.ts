@@ -50,7 +50,9 @@ export const ERROR_CODES = {
   INTERNAL: "INTERNAL",
   DATABASE_ERROR: "DATABASE_ERROR",
   CONFLICT: "CONFLICT",
-  HTTP_ERROR: "HTTP_ERROR"
+  HTTP_ERROR: "HTTP_ERROR",
+  // #815 — a policy limit on an expensive operation was reached.
+  OPERATION_LIMIT_EXCEEDED: "OPERATION_LIMIT_EXCEEDED"
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

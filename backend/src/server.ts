@@ -86,6 +86,15 @@ const app = buildApp({
   reminderLeadHours: env.REMINDER_LEAD_HOURS,
   jobStore: env.WORKER_ENABLED ? new PrismaJobStore(prisma) : undefined,
   jobWorkerPollIntervalMs: env.WORKER_POLL_INTERVAL_MS,
+  // #812–#815
+  receiptSigningSecret: env.RECEIPT_SIGNING_SECRET,
+  receiptPreviousPublicKeys: (env.RECEIPT_PREVIOUS_PUBLIC_KEYS ?? "")
+    .split(",")
+    .map((key) => key.trim())
+    .filter(Boolean),
+  pendingStaleThresholdMs: env.PENDING_STALE_THRESHOLD_MINUTES * 60_000,
+  recoveryMaxAttempts: env.RECOVERY_MAX_ATTEMPTS,
+  operationLimits: env.OPERATION_LIMITS,
   adminWalletAddresses: (env.ADMIN_WALLET_ADDRESSES ?? "")
     .split(",")
     .map((wallet) => wallet.trim())

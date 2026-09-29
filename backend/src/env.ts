@@ -99,7 +99,28 @@ const schema = z.object({
   CRITICAL_READ_MIN_QUORUM: z.coerce.number().int().positive().default(2),
   CRITICAL_READ_MAX_FRESHNESS_MS: z.coerce.number().int().positive().default(15_000),
   CRITICAL_READ_MAX_LEDGER_DIVERGENCE: z.coerce.number().int().nonnegative().default(2),
-  CRITICAL_READ_MAX_LATENCY_MS: z.coerce.number().int().positive().default(8_000)
+  CRITICAL_READ_MAX_LATENCY_MS: z.coerce.number().int().positive().default(8_000),
+  /**
+   * #812 — Stellar secret seed (S...) that signs activity receipts. Its
+   * public key is served at GET /receipts/public-key. When unset, an
+   * ephemeral key is generated at boot (receipts stop verifying after a
+   * restart), so set it in every shared environment.
+   */
+  RECEIPT_SIGNING_SECRET: z
+    .string()
+    .regex(/^S[A-Z2-7]{55}$/, "RECEIPT_SIGNING_SECRET must be a Stellar secret seed (S...)")
+    .optional(),
+  /** #812 — comma-separated retired public keys still accepted after a key rotation. */
+  RECEIPT_PREVIOUS_PUBLIC_KEYS: z.string().optional(),
+  /** #813 — an in-flight action untouched for this long is "stuck". */
+  PENDING_STALE_THRESHOLD_MINUTES: z.coerce.number().int().positive().default(30),
+  /** #813 — automatic retries before a recovery case becomes `failed`. */
+  RECOVERY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(3),
+  /**
+   * #815 — JSON overrides for operation limits, e.g.
+   * {"action.create":{"limit":50,"windowSeconds":60}}. Unknown operations fail boot.
+   */
+  OPERATION_LIMITS: z.string().optional()
 });
 
 export type Env = z.infer<typeof schema>;
@@ -148,7 +169,12 @@ export function getEnv(): Env {
       CRITICAL_READ_MIN_QUORUM: Number(process.env.CRITICAL_READ_MIN_QUORUM ?? 2),
       CRITICAL_READ_MAX_FRESHNESS_MS: Number(process.env.CRITICAL_READ_MAX_FRESHNESS_MS ?? 15_000),
       CRITICAL_READ_MAX_LEDGER_DIVERGENCE: Number(process.env.CRITICAL_READ_MAX_LEDGER_DIVERGENCE ?? 2),
-      CRITICAL_READ_MAX_LATENCY_MS: Number(process.env.CRITICAL_READ_MAX_LATENCY_MS ?? 8_000)
+      CRITICAL_READ_MAX_LATENCY_MS: Number(process.env.CRITICAL_READ_MAX_LATENCY_MS ?? 8_000),
+      RECEIPT_SIGNING_SECRET: process.env.RECEIPT_SIGNING_SECRET || undefined,
+      RECEIPT_PREVIOUS_PUBLIC_KEYS: process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS || undefined,
+      PENDING_STALE_THRESHOLD_MINUTES: Number(process.env.PENDING_STALE_THRESHOLD_MINUTES ?? 30),
+      RECOVERY_MAX_ATTEMPTS: Number(process.env.RECOVERY_MAX_ATTEMPTS ?? 3),
+      OPERATION_LIMITS: process.env.OPERATION_LIMITS || undefined
     } satisfies Env;
   }
   return parseEnv();

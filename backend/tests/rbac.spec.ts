@@ -9,6 +9,19 @@ import {
 import { auditRoutes } from "../src/routes/audit.js";
 import { internalRoutes } from "../src/routes/internal.js";
 import { reconciliationRoutes } from "../src/routes/reconciliation.js";
+// #812–#815 routes, backed by in-memory services.
+import { receiptsRoutes } from "../src/routes/receipts.js";
+import { recoveryRoutes } from "../src/routes/recovery.js";
+import { auditTrailRoutes } from "../src/routes/auditTrail.js";
+import { operationLimitsRoutes } from "../src/routes/operationLimits.js";
+import { AuditTrailService, InMemoryAuditTrailStore } from "../src/services/auditTrail.js";
+import { InMemoryReceiptStore, ReceiptService, StellarReceiptSigner } from "../src/services/receipts.js";
+import { InMemoryRecoveryCaseStore, PendingRecoveryService } from "../src/services/pendingRecovery.js";
+import {
+  InMemoryLimitCounterStore,
+  InMemoryLimitOverrideStore,
+  OperationLimitService,
+} from "../src/services/operationLimits.js";
 import {
   PERMISSIONS,
   ROLES,
@@ -59,6 +72,53 @@ function buildApp(): FastifyInstance {
   );
   app.register(internalRoutes(ledgerSvc as any, SECRET, traceSvc as any));
   app.register(reconciliationRoutes({} as any, SECRET));
+
+  // #812–#815: fresh in-memory services per app.
+  const noActions = {
+    getAction: async () => null,
+    findByTxHash: async () => null,
+    listStale: async () => [],
+    countStale: async () => 0,
+  };
+  const trail = new AuditTrailService(new InMemoryAuditTrailStore());
+  const noop = (async () => {}) as any;
+  app.register(
+    receiptsRoutes(
+      new ReceiptService({ store: new InMemoryReceiptStore(), signer: StellarReceiptSigner.ephemeral(), actions: noActions }),
+      {
+        read: requirePermission("own.receipts.read", [wallet]),
+        admin: requirePermission("admin.receipts.read", [wallet]),
+        verifyLimit: noop,
+      },
+    ),
+  );
+  app.register(
+    recoveryRoutes(new PendingRecoveryService({ store: new InMemoryRecoveryCaseStore(), actions: noActions, audit: trail }), {
+      ownRead: requirePermission("own.data.read", [wallet]),
+      ownRetry: requirePermission("own.data.read", [wallet]),
+      adminRead: requirePermission("admin.recovery.read", [wallet]),
+      adminWrite: requirePermission("admin.recovery.write", [wallet]),
+    }),
+  );
+  app.register(
+    auditTrailRoutes(trail, {
+      read: requirePermission("admin.audit_trail.read", [wallet]),
+      export: requirePermission("admin.audit_trail.export", [wallet]),
+    }),
+  );
+  app.register(
+    operationLimitsRoutes(
+      new OperationLimitService({
+        counters: new InMemoryLimitCounterStore(),
+        overrides: new InMemoryLimitOverrideStore(),
+        audit: trail,
+      }),
+      {
+        read: requirePermission("admin.limits.read", [wallet]),
+        write: requirePermission("admin.limits.write", [wallet]),
+      },
+    ),
+  );
   return app;
 }
 
@@ -70,6 +130,19 @@ const ADMIN_ROUTES = [
   { method: "GET", url: "/admin/audit", permission: "admin.audit.read" },
   { method: "POST", url: "/admin/audit", permission: "admin.audit.write", payload: auditBody },
   { method: "GET", url: "/admin/audit/export", permission: "admin.audit.export" },
+  // #812–#815
+  { method: "GET", url: "/admin/receipts/rcpt_x/verify", permission: "admin.receipts.read" },
+  { method: "GET", url: "/admin/recovery/diagnostics", permission: "admin.recovery.read" },
+  { method: "POST", url: "/admin/recovery/scan", permission: "admin.recovery.write", payload: {} },
+  { method: "GET", url: "/admin/audit-trail", permission: "admin.audit_trail.read" },
+  { method: "GET", url: "/admin/audit-trail/export", permission: "admin.audit_trail.export" },
+  { method: "GET", url: "/admin/limits", permission: "admin.limits.read" },
+  {
+    method: "POST",
+    url: "/admin/limits/reset",
+    permission: "admin.limits.write",
+    payload: { operation: "action.create", scope_key: "wallet:gx", reason: "rbac test" },
+  },
 ] as const;
 const SERVICE_ROUTES = [
   { method: "POST", url: "/internal/reconcile", permission: "internal.reconcile", payload: {} },
