@@ -47,6 +47,8 @@ import { exportsRoutes } from "./routes/exports.js";
 import { importsRoutes } from "./routes/imports.js";
 import { OperationalHealthService } from "./services/operationalHealthService.js";
 import { operationalHealthRoutes } from "./routes/operationalHealth.js";
+import { TrendAggregationService } from "./services/trendAggregationService.js";
+import { trendAggregationRoutes } from "./routes/trendAggregation.js";
 
 export type AppDeps = {
   prisma: PrismaClient;
@@ -229,6 +231,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   );
   const dashboardAggregateSvc = new DashboardAggregateService(deps.prisma);
   const operationalHealthSvc = new OperationalHealthService(deps.prisma);
+  const trendAggregationSvc = new TrendAggregationService(deps.prisma);
 
   // Register routes (healthRoutes already includes /health endpoint)
   app.register(actionsRoutes(svc, apiKeyGuard));
@@ -263,6 +266,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     }),
   );
   app.register(dashboardAggregatesRoutes(dashboardAggregateSvc, apiKeyGuard));
+  app.register(trendAggregationRoutes(trendAggregationSvc, apiKeyGuard));
 
   // Wallet-scoped data portability (#772, #773). Authorization is enforced by
   // the permission guards and by the services' own wallet-scope checks.

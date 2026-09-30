@@ -472,3 +472,38 @@ model OutboundAction {
   @@index([status, updatedAt])
   @@map("outbound_actions")
 }
+
+// #750 — dashboard aggregates for transactionally-consistent dashboard views
+model DashboardAggregate {
+  id                String   @id @default(uuid()) @db.Uuid
+  scope             String   @unique
+  watermark         DateTime @map("watermark")
+  totalValueLocked  String   @map("total_value_locked")
+  totalPrizePool    String   @map("total_prize_pool")
+  winDistribution   Json     @map("win_distribution")
+  depositCount      Int      @map("deposit_count")
+  depositTotal      String   @map("deposit_total")
+  computedAt        DateTime @map("computed_at")
+
+  @@map("dashboard_aggregates")
+}
+
+// Historical trend aggregation for maintainer analytics
+model TrendAggregate {
+  id                String   @id @default(uuid()) @db.Uuid
+  metricName        String   @map("metric_name")
+  window            String   // "hour", "day", "week", "month"
+  windowStart       DateTime @map("window_start")
+  windowEnd         DateTime @map("window_end")
+  value             Float
+  count             Int      @default(0)
+  metadata          Json?    @map("metadata")
+  schemaVersion     Int      @default(1) @map("schema_version")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([metricName, window, windowStart])
+  @@index([metricName, windowStart(sort: Desc)])
+  @@index([windowStart, windowEnd])
+  @@map("trend_aggregates")
+}
