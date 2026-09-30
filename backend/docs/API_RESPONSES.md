@@ -38,7 +38,7 @@ Clients should pass the returned cursor back as `?cursor=` unchanged.
 
 All errors use one envelope. The full field reference, the complete code
 table (category, retryability, HTTP status) and worked examples live in
-[`docs/API.md`](../../docs/API.md#standard-errors); they are enforced by
+[`docs/API.md`(________docs/API.md#standard-errors); they are enforced by
 `tests/apiContract.spec.ts`.
 
 ```json
@@ -61,8 +61,8 @@ Codes, categories, retryability and user-facing text come from the catalog in
 `error_id` is the request's correlation id (also the `Correlation-Id` header)
 and is what users should quote to support.
 
-Validation responses include Zod `issues`; frontend code should prefer
-`error.message` for general copy and field-specific `issues` when rendering
+Validation responses include Zod `issues`; frontend code should prefer`
+error.message` for general copy and field-specific `issues` when rendering
 forms.
 
 ## Network and upstream failures
@@ -72,3 +72,65 @@ upstream should return `NETWORK_ERROR` when the failure is expected/recoverable.
 Unknown exceptions fall back to `INTERNAL`. Frontends should retry only when
 `error.retryable` is `true` (with backoff, honouring `Retry-After`); never
 auto-retry validation, auth, or conflict errors.
+
+## Bulk import dry run
+
+Bulk imports are previewed before any record is written. The dry-run endpoint
+returns the same envelope as other routes and never persists changes.
+
+```json
+{
+  "data": {
+    "dry_run": true,
+    "counts": {
+      "create": 12,
+      "update": 3,
+      "skip": 1,
+      "duplicate": 2,
+      "error": 1
+    },
+    "rows": [
+      {
+        "row": 1,
+        "action": "create",
+        "id": "vault_new",
+        "errors": []
+      },
+      {
+        "row": 4,
+        "action": "duplicate",
+        "id": "vault_dup",
+        "errors": [],
+        "conflict": {
+          "kind": "duplicate_in_payload",
+          "matches_row": 2
+        }
+      },
+      {
+        "row": 7,
+        "action": "error",
+        "id": null,
+        "errors": [
+          {
+            "path": "vault_id",
+            "code": "invalid_string",
+            "message": "Vault ID must be a non-empty string."
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The dry run is pure: it validates the payload, classifies each row as
+`create`, `update`, `skip`, `duplicate` or `error`, and reports conflicts
+without exposing secrets. Row errors use the same Zod `issues` shape as the
+validation envelope so clients can render them with existing form code. Conflict
+details only include identifiers and row numbers; secrets and credentials are
+never echoed back.
+
+When the payload itself is malformed (for example missing `rows`), the route
+returns the standard `INVALID_PAYLOAD` error envelope instead of a dry-run
+result. Partial failures are reported per row in `data.rows` with an `error`
+action and are never written during the dry run.
