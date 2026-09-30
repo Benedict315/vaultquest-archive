@@ -16,6 +16,7 @@ export interface IndexerCheckpoint {
   id?: string;
   latestLedger: number;
   lastProcessedEventId?: string | null;
+  indexerVersion?: string | null;
   lastSyncTime: Date;
   lastSuccessSyncTime?: Date;
   lastError?: string | null;
