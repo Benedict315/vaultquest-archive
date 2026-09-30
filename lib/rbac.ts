@@ -13,6 +13,18 @@ export const PERMISSIONS = [
   "own.data.read",
   "own.data.export",
   "own.data.import",
+  // #812: a wallet reads its own signed receipts; maintainers read any.
+  "own.receipts.read",
+  "admin.receipts.read",
+  // #813: stuck pending-action diagnostics and recovery actions.
+  "admin.recovery.read",
+  "admin.recovery.write",
+  // #814: immutable audit trail query/export.
+  "admin.audit_trail.read",
+  "admin.audit_trail.export",
+  // #815: operation-limit policies, overrides and resets.
+  "admin.limits.read",
+  "admin.limits.write",
   "admin.audit.read",
   "admin.audit.write",
   "admin.audit.export",
@@ -27,7 +39,12 @@ export const PERMISSIONS = [
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
-const USER_PERMISSIONS: readonly Permission[] = ["own.data.read", "own.data.export", "own.data.import"];
+const USER_PERMISSIONS: readonly Permission[] = [
+  "own.data.read",
+  "own.data.export",
+  "own.data.import",
+  "own.receipts.read",
+];
 
 /**
  * Role capability matrix. Maintainers are a strict superset of users; service
@@ -43,6 +60,13 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = {
     "admin.audit.export",
     "admin.ledger.verify",
     "admin.export.any",
+    "admin.receipts.read",
+    "admin.recovery.read",
+    "admin.recovery.write",
+    "admin.audit_trail.read",
+    "admin.audit_trail.export",
+    "admin.limits.read",
+    "admin.limits.write",
   ],
   service: [
     "internal.reconcile",

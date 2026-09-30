@@ -32,4 +32,5 @@ export type ActionRecord = {
   finalizedLedger: number | null;
   confirmationDepth: number | null;
   compensatesId: string | null;
+  recoveryCheckpoint: unknown;
 };

@@ -5,6 +5,7 @@ import type { LedgerService } from "../services/ledger.js";
 import {
   createActionBody,
   attachTxBody,
+  actionCheckpointBody,
   cancelBody,
   listQuery,
   dashboardQuery,
@@ -15,9 +16,31 @@ import {
 } from "../schemas/actions.js";
 import { AppError } from "../errors.js";
 import { ok, page } from "../responses.js";
+import type { ActionRecord } from "../types.js";
+
+/**
+ * #812: called after an action is created (or a duplicate request returns
+ * the existing one), submitted or cancelled — used to issue signed receipts.
+ * Hook failures are logged and never fail the committed operation; receipt
+ * lookups re-issue anything missing.
+ */
+export type ActionLifecycleHooks = {
+  onActionChanged?: (action: ActionRecord) => Promise<unknown>;
+};
 
 function serialize(row: Awaited<ReturnType<LedgerService["getAction"]>>) {
   if (!row) return null;
+  const checkpoint = row.recoveryCheckpoint as { stage?: string } | null;
+  const nextAction = row.status === "confirmed" || row.status === "failed" || row.status === "reverted"
+    ? "none"
+    : row.status === "pending" && checkpoint?.stage === "intent_recorded"
+      ? "continue_wallet_approval"
+      : "verify_wallet_or_chain_before_retry";
+  const recoveryMessage = nextAction === "continue_wallet_approval"
+    ? "Continue this action using its existing idempotency key."
+    : nextAction === "verify_wallet_or_chain_before_retry"
+      ? "Verify wallet or chain activity before starting another action. Do not resubmit this operation."
+      : "No recovery action is required.";
   return {
     id: row.id,
     idempotency_key: row.idempotencyKey,
@@ -31,6 +54,11 @@ function serialize(row: Awaited<ReturnType<LedgerService["getAction"]>>) {
     error_code: row.errorCode,
     error_detail: row.errorDetail,
     retry_count: row.retryCount,
+    recovery: {
+      checkpoint: row.recoveryCheckpoint,
+      next_action: nextAction,
+      message: recoveryMessage
+    },
     created_at: row.createdAt,
     updated_at: row.updatedAt,
     submitted_at: row.submittedAt,
@@ -41,9 +69,19 @@ function serialize(row: Awaited<ReturnType<LedgerService["getAction"]>>) {
 
 export const actionsRoutes = (
   svc: LedgerService,
-  apiKeyGuard: preHandlerHookHandler
+  apiKeyGuard: preHandlerHookHandler,
+  hooks: ActionLifecycleHooks = {}
 ): FastifyPluginAsync =>
   async (app) => {
+    const notify = async (action: ActionRecord, log: { error: (obj: object, msg: string) => void }) => {
+      if (!hooks.onActionChanged) return;
+      try {
+        await hooks.onActionChanged(action);
+      } catch (err) {
+        log.error({ err, actionId: action.id }, "action lifecycle hook failed");
+      }
+    };
+
     app.post("/actions", async (req, reply) => {
       const keyHeader = req.headers["idempotency-key"];
       const keyRaw = Array.isArray(keyHeader) ? keyHeader[0] : keyHeader;
@@ -64,6 +102,8 @@ export const actionsRoutes = (
         actionType: body.action_type,
         actionPayload: body.action_payload
       });
+      // Duplicate requests reach the same (idempotent) receipt.
+      await notify(result, req.log);
       reply.status(existing ? 200 : 201);
       return ok(serialize(result));
     });
@@ -74,12 +114,19 @@ export const actionsRoutes = (
       const result = await svc.attachTxHash(req.params.id, body.tx_hash, { workerId });
       // #753: the signing layer's hand-off, logged under the correlation key.
       req.log.info({ txHash: body.tx_hash, actionId: result.id, status: result.status }, "action tx_hash attached");
+      await notify(result, req.log);
       return ok(serialize(result));
+    });
+
+    app.post<{ Params: { id: string } }>("/actions/:id/checkpoint", async (req) => {
+      actionCheckpointBody.parse(req.body);
+      return ok(serialize(await svc.markExternalActionStarted(req.params.id)));
     });
 
     app.post<{ Params: { id: string } }>("/actions/:id/cancel", async (req) => {
       const body = cancelBody.parse(req.body);
       const result = await svc.cancelAction(req.params.id, body.error_code, body.error_detail);
+      await notify(result, req.log);
       return ok(serialize(result));
     });
 

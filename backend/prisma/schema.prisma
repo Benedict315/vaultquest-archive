@@ -1,3 +1,4 @@
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -68,6 +69,7 @@ model ActionLedger {
   finalizedLedger   Int?         @map("finalized_ledger")
   confirmationDepth Int?         @map("confirmation_depth")
   compensatesId     String?      @map("compensates_id")
+  recoveryCheckpoint Json?       @map("recovery_checkpoint")
 
   @@index([walletAddress, createdAt(sort: Desc)])
   @@index([status, updatedAt])
