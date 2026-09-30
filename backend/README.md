@@ -23,6 +23,8 @@ pnpm test
 pnpm dev
 ```
 
+For isolated local integration work without production credentials, use the [integration sandbox](docs/INTEGRATION_SANDBOX.md). It runs a loopback-only PostgreSQL database and deterministic fake wallet/settlement adapters.
+
 ## Endpoints
 
 | Method | Path | Purpose |
