@@ -14,6 +14,7 @@
     "sandbox": "node --env-file=.env --import tsx src/scripts/sandboxSettlement.ts",
     "sandbox:server": "node --env-file=.env --import tsx src/server.ts",
     "indexer:backfill": "tsx src/scripts/backfill.ts",
+    "reconcile:dry-run": "tsx src/scripts/reconcile.ts --dry-run",
     "dr:drill": "tsx src/scripts/drDrill.ts",
     "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\"",
     "test": "vitest run",
