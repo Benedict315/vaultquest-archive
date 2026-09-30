@@ -100,6 +100,18 @@
           "relatedIssues": [
             "#415"
           ]
+        },
+        {
+          "id": "20260930000000_add_action_recovery_checkpoints",
+          "timestamp": "2026-09-30T00:00:00Z",
+          "description": "Persist recovery checkpoints for interrupted wallet actions",
+          "tables": [
+            "action_ledger"
+          ],
+          "breaking": false,
+          "relatedIssues": [
+            "#788"
+          ]
         }
       ]
     },

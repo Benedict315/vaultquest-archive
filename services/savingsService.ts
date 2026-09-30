@@ -74,7 +74,14 @@ export interface UserQuestParticipation {
  * Mirrors `deposit` in the drip-pool contract: `amount <= 0` is rejected with
  * `InvalidAmount` before any state mutation.
  */
-export const SavingsService = {
+export function createSavingsService(policyOverrides: BusinessPolicyOverrides = {}) {
+  const policy = new BusinessPolicyEngine(policyOverrides);
+  const assertAllowed = (decision: ReturnType<BusinessPolicyEngine["evaluate"]>) => {
+    if (decision.status === "deny") throw new BusinessPolicyError(decision);
+    return decision;
+  };
+
+  return {
   /**
    * Validates a deposit against contract semantics.
    * @throws Error with message `InvalidAmount` when `amount <= 0`.
@@ -124,7 +131,13 @@ export const SavingsService = {
       participation.prize,
       participation.claimedReward,
     );
-    return available > 0 ? available : 0;
+    const decision = assertAllowed(policy.evaluate({
+      rule: "claim",
+      deadline: participation.claimDeadline,
+      now: now ?? Date.now(),
+      availableAmount: available
+    }));
+    return decision.status === "noop" ? 0 : available;
   },
 
   /**
@@ -132,7 +145,7 @@ export const SavingsService = {
    * never applied to principal.
    */
   lockupWeightBps(lockupDays: number): number {
-    return lockupMultiplierBps(lockupDays);
+    return assertAllowed(policy.evaluate({ rule: "lockup_weight", lockupDays })).value ?? 100;
   },
 
   /**
@@ -144,10 +157,7 @@ export const SavingsService = {
     participation: UserQuestParticipation,
     amount: number,
   ): Promise<UserQuestParticipation> {
-    const err = validateDepositAmount(amount);
-    if (err) {
-      throw new Error(err);
-    }
+    assertAllowed(policy.evaluate({ rule: "deposit", amount }));
 
     participation.currentBalance += amount;
     participation.streakDays += 1;
@@ -174,21 +184,24 @@ export const SavingsService = {
    * balance is already fully claimed.
    */
   async creditReward(participation: UserQuestParticipation, amount: number): Promise<number> {
-    const err = validateDepositAmount(amount);
-    if (err) throw new Error(err);
+    assertAllowed(policy.evaluate({ rule: "quest_reward", amount }));
     participation.yieldAccrued += amount;
     return participation.yieldAccrued;
   },
 
   async claimReward(participation: UserQuestParticipation, now?: number): Promise<number> {
-    const deadlineErr = validateClaimDeadline(participation.claimDeadline, now ?? Date.now());
-    if (deadlineErr) throw new Error(deadlineErr);
     const available = claimableTotal(
       participation.yieldAccrued,
       participation.prize,
       participation.claimedReward,
     );
-    if (available <= 0) return 0;
+    const decision = assertAllowed(policy.evaluate({
+      rule: "claim",
+      deadline: participation.claimDeadline,
+      now: now ?? Date.now(),
+      availableAmount: available
+    }));
+    if (decision.status === "noop") return 0;
     participation.claimedReward += available;
     return available;
   },
@@ -203,7 +216,10 @@ export const SavingsService = {
     progress.completedAt = Date.now();
     return progress;
   },
-};
+  };
+}
+
+export const SavingsService = createSavingsService();
 
 export function isContractBehaviorError(value: unknown): value is ContractBehaviorError {
   return (

@@ -6,6 +6,26 @@
 
 -
 
+## Release Readiness (complete for high-risk changes)
+
+- [ ] Tests added or updated for the changed behavior
+- [ ] Documentation updated (or explicitly not applicable)
+- [ ] Migration safety preview run for new migrations (`migrationSafetyCli.ts` --preview)
+- [ ] New env vars / contract IDs documented in `docs/environment.md`
+- [ ] Rollback or forward-fix plan written below
+
+- [ ] Automated check passes: `node --exports-map tsx scripts/releaseReadiness.ts --base origin/main`
+
+## Rollback / Forward-Fix Plan
+
+-
+
+## Emergency Exception (only if a category cannot be satisfied)
+
+- Categories not satisfied and why:
+- Impact of shipping now vs. waiting:
+- Follow-up PR/Issue that closes the gap:
+
 ## Validation
 
 - [ ] `npm run lint`

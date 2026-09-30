@@ -1,9 +1,13 @@
 import { z } from "zod";
+import { parseSandboxConfig, SANDBOX_SCENARIOS } from "./sandbox/config.js";
 
 const placeholderPattern = /PLACEHOLDER|YOUR_|CHANGE-ME|EXAMPLE|<.+?>/i;
 
 const schema = z.object({
-  DATABASE_URL: z.string().url().or(z.string().startsWith("postgres")),
+  DATABASE_URL: z.string().url().or(z.string().startsWith("postgres")).optional(),
+  SANDBOX_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  SANDBOX_DATABASE_URL: z.string().url().optional(),
+  SANDBOX_SCENARIO: z.enum(SANDBOX_SCENARIOS).default("success"),
   INTERNAL_SERVICE_SECRET: z
     .string()
     .min(20)
@@ -99,7 +103,28 @@ const schema = z.object({
   CRITICAL_READ_MIN_QUORUM: z.coerce.number().int().positive().default(2),
   CRITICAL_READ_MAX_FRESHNESS_MS: z.coerce.number().int().positive().default(15_000),
   CRITICAL_READ_MAX_LEDGER_DIVERGENCE: z.coerce.number().int().nonnegative().default(2),
-  CRITICAL_READ_MAX_LATENCY_MS: z.coerce.number().int().positive().default(8_000)
+  CRITICAL_READ_MAX_LATENCY_MS: z.coerce.number().int().positive().default(8_000),
+  /**
+   * #812 — Stellar secret seed (S...) that signs activity receipts. Its
+   * public key is served at GET /receipts/public-key. When unset, an
+   * ephemeral key is generated at boot (receipts stop verifying after a
+   * restart), so set it in every shared environment.
+   */
+  RECEIPT_SIGNING_SECRET: z
+    .string()
+    .regex(/^S[A-Z2-7]{55}$/, "RECEIPT_SIGNING_SECRET must be a Stellar secret seed (S...)")
+    .optional(),
+  /** #812 — comma-separated retired public keys still accepted after a key rotation. */
+  RECEIPT_PREVIOUS_PUBLIC_KEYS: z.string().optional(),
+  /** #813 — an in-flight action untouched for this long is "stuck". */
+  PENDING_STALE_THRESHOLD_MINUTES: z.coerce.number().int().positive().default(30),
+  /** #813 — automatic retries before a recovery case becomes `failed`. */
+  RECOVERY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(3),
+  /**
+   * #815 — JSON overrides for operation limits, e.g.
+   * {"action.create":{"limit":50,"windowSeconds":60}}. Unknown operations fail boot.
+   */
+  OPERATION_LIMITS: z.string().optional()
 });
 
 export type Env = z.infer<typeof schema>;
@@ -118,9 +143,12 @@ export function parseEnv(
 }
 
 export function getEnv(): Env {
-  if (process.env.SKIP_ENV_VALIDATION === "1") {
+  if (process.env.SKIP_ENV_VALIDATION === "1" && process.env.SANDBOX_MODE !== "true") {
     return {
       DATABASE_URL: process.env.DATABASE_URL ?? "",
+      SANDBOX_MODE: false,
+      SANDBOX_DATABASE_URL: process.env.SANDBOX_DATABASE_URL || undefined,
+      SANDBOX_SCENARIO: (process.env.SANDBOX_SCENARIO ?? "success") as Env["SANDBOX_SCENARIO"],
       INTERNAL_SERVICE_SECRET: process.env.INTERNAL_SERVICE_SECRET ?? "",
       ORPHAN_TTL_MINUTES: Number(process.env.ORPHAN_TTL_MINUTES ?? 10),
       LOG_LEVEL: (process.env.LOG_LEVEL ?? "info") as Env["LOG_LEVEL"],
@@ -148,7 +176,12 @@ export function getEnv(): Env {
       CRITICAL_READ_MIN_QUORUM: Number(process.env.CRITICAL_READ_MIN_QUORUM ?? 2),
       CRITICAL_READ_MAX_FRESHNESS_MS: Number(process.env.CRITICAL_READ_MAX_FRESHNESS_MS ?? 15_000),
       CRITICAL_READ_MAX_LEDGER_DIVERGENCE: Number(process.env.CRITICAL_READ_MAX_LEDGER_DIVERGENCE ?? 2),
-      CRITICAL_READ_MAX_LATENCY_MS: Number(process.env.CRITICAL_READ_MAX_LATENCY_MS ?? 8_000)
+      CRITICAL_READ_MAX_LATENCY_MS: Number(process.env.CRITICAL_READ_MAX_LATENCY_MS ?? 8_000),
+      RECEIPT_SIGNING_SECRET: process.env.RECEIPT_SIGNING_SECRET || undefined,
+      RECEIPT_PREVIOUS_PUBLIC_KEYS: process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS || undefined,
+      PENDING_STALE_THRESHOLD_MINUTES: Number(process.env.PENDING_STALE_THRESHOLD_MINUTES ?? 30),
+      RECOVERY_MAX_ATTEMPTS: Number(process.env.RECOVERY_MAX_ATTEMPTS ?? 3),
+      OPERATION_LIMITS: process.env.OPERATION_LIMITS || undefined
     } satisfies Env;
   }
   return parseEnv();

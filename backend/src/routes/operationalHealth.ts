@@ -90,6 +90,7 @@ export const operationalHealthRoutes = (
 
         const validCategories = [
           "Orphaned Actions",
+          "Abandoned Pending Actions",
           "Stale Pending Events",
           "Failed Background Jobs",
           "Unresolved Vault Settlements",
