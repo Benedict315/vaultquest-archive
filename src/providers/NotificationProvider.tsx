@@ -22,10 +22,13 @@ import {
   dismissNotification,
   markAllNotificationsRead,
   markNotificationRead,
+  markNotificationUnread,
+  isNotificationTargeted,
   pruneExpiredNotifications,
   sortNotifications,
   upsertNotification,
   type NotificationInput,
+  type NotificationViewer,
   type NotificationScope,
   type VaultNotification,
 } from "../../lib/notification-dedup";
@@ -44,6 +47,7 @@ export interface NotificationCenterApi {
   /** Adds/updates/collapses an incoming protocol alert. */
   dispatchAlert: (input: NotificationInput) => void;
   markRead: (id: string) => void;
+  markUnread: (id: string) => void;
   markAllRead: () => void;
   dismiss: (id: string) => void;
   dismissAll: (scope?: NotificationScope) => void;
@@ -58,6 +62,12 @@ interface NotificationProviderProps {
   scopeKey?: string;
   /** Seed alerts (e.g. demo data or pre-fetch). Deduplicated on load. */
   initialAlerts?: NotificationInput[];
+  /**
+   * Authenticated notification viewer. Wallet and admin-only alerts are
+   * filtered before they enter this provider's state, so an alert supplied
+   * for another account cannot be rendered or persisted by this session.
+   */
+  viewer?: NotificationViewer;
   /** Injected implementation for tests / non-DOM environments. */
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | undefined;
 }
@@ -90,6 +100,7 @@ export function NotificationProvider({
   children,
   scopeKey = "anonymous@testnet",
   initialAlerts = [],
+  viewer,
   storage,
 }: NotificationProviderProps) {
   const store: Pick<Storage, "getItem" | "setItem" | "removeItem"> = useMemo(
@@ -100,7 +111,7 @@ export function NotificationProvider({
   storeRef.current = store;
 
   const [notifications, setNotifications] = useState<VaultNotification[]>(() => {
-    const seeded = loadSeeds(initialAlerts);
+    const seeded = loadSeeds(initialAlerts).filter((alert) => isNotificationTargeted(alert, viewer));
     const persisted = loadPersisted(scopeKey, storeRef.current);
     const hydrated = seeded.map((n) => ({
       ...n,
@@ -127,13 +138,22 @@ export function NotificationProvider({
 
   const dispatchAlert = useCallback((input: NotificationInput) => {
     setNotifications((current) => {
-      const { notifications: next } = upsertNotification(current, createNotification(input));
+      const incoming = createNotification(input);
+      // Targeting is enforced at the state boundary. This matters for a
+      // shared event stream where an event can be delivered after account
+      // switching; never retain another wallet's private payload locally.
+      if (!isNotificationTargeted(incoming, viewer)) return current;
+      const { notifications: next } = upsertNotification(current, incoming);
       return sortNotifications(next);
     });
-  }, []);
+  }, [viewer]);
 
   const markRead = useCallback((id: string) => {
     setNotifications((current) => markNotificationRead(current, id));
+  }, []);
+
+  const markUnread = useCallback((id: string) => {
+    setNotifications((current) => markNotificationUnread(current, id));
   }, []);
 
   const markAllRead = useCallback(() => {
@@ -152,7 +172,7 @@ export function NotificationProvider({
     setNotifications((current) => pruneExpiredNotifications(current));
   }, []);
 
-  const unreadCount = useMemo(() => countUnread(notifications), [notifications]);
+  const unreadCount = useMemo(() => countUnread(notifications, viewer), [notifications, viewer]);
 
   const api = useMemo<NotificationCenterApi>(
     () => ({
@@ -161,12 +181,13 @@ export function NotificationProvider({
       unreadCount,
       dispatchAlert,
       markRead,
+      markUnread,
       markAllRead,
       dismiss,
       dismissAll,
       clearExpired,
     }),
-    [scopeKey, notifications, unreadCount, dispatchAlert, markRead, markAllRead, dismiss, dismissAll, clearExpired],
+    [scopeKey, notifications, unreadCount, dispatchAlert, markRead, markUnread, markAllRead, dismiss, dismissAll, clearExpired],
   );
 
   return <NotificationCenterContext.Provider value={api}>{children}</NotificationCenterContext.Provider>;

@@ -915,6 +915,13 @@ The following states are terminal and cannot transition further:
 - `reverted`
 - `orphaned`
 
+### Pool / vault status
+
+Pool status is governed by a separate deterministic state machine. See
+[POOL_LIFECYCLE.md](./POOL_LIFECYCLE.md) for the canonical states, the legal
+transition table, terminal states, the `VAULT_INVALID_STATE_TRANSITION`
+rejection code, and the audit event shape.
+
 ## Data Types
 
 ### Action Types

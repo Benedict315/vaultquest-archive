@@ -475,84 +475,37 @@ model OutboundAction {
   @@map("outbound_actions")
 }
 
-// #814 — append-only, hash-chained audit trail. UPDATE/DELETE/TRUNCATE are
-// rejected by a trigger (see migration 20260929000000); see services/auditTrail.ts.
-model AuditTrailRecord {
-  id             String   @id @db.Uuid
-  sequence       Int      @unique
-  category       String
-  action         String
-  actorSubject   String   @map("actor_subject")
-  actorRole      String   @map("actor_role")
-  targetType     String   @map("target_type")
-  targetId       String   @map("target_id")
-  reason         String?
-  before         Json?
-  after          Json?
-  metadata       Json?
-  redactedFields String[] @default([]) @map("redacted_fields")
-  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(3)
-  prevHash       String   @map("prev_hash")
-  recordHash     String   @map("record_hash")
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+// #750 — dashboard aggregates for transactionally-consistent dashboard views
+model DashboardAggregate {
+  id                String   @id @default(uuid()) @db.Uuid
+  scope             String   @unique
+  watermark         DateTime @map("watermark")
+  totalValueLocked  String   @map("total_value_locked")
+  totalPrizePool    String   @map("total_prize_pool")
+  winDistribution   Json     @map("win_distribution")
+  depositCount      Int      @map("deposit_count")
+  depositTotal      String   @map("deposit_total")
+  computedAt        DateTime @map("computed_at")
 
-  @@index([category, sequence(sort: Desc)])
-  @@index([actorSubject, sequence(sort: Desc)])
-  @@index([targetType, targetId, sequence(sort: Desc)])
-  @@map("audit_trail")
+  @@map("dashboard_aggregates")
 }
 
-// #812 — one signed receipt per (action, stage); see services/receipts.ts.
-model ActionReceipt {
-  receiptId String   @id @map("receipt_id")
-  actionId  String   @map("action_id") @db.Uuid
-  stage     String
-  payload   Json
-  algorithm String
-  keyId     String   @map("key_id")
-  signature String
-  issuedAt  DateTime @default(now()) @map("issued_at") @db.Timestamptz(3)
+// Historical trend aggregation for maintainer analytics
+model TrendAggregate {
+  id                String   @id @default(uuid()) @db.Uuid
+  metricName        String   @map("metric_name")
+  window            String   // "hour", "day", "week", "month"
+  windowStart       DateTime @map("window_start")
+  windowEnd         DateTime @map("window_end")
+  value             Float
+  count             Int      @default(0)
+  metadata          Json?    @map("metadata")
+  schemaVersion     Int      @default(1) @map("schema_version")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
-  @@unique([actionId, stage])
-  @@index([actionId])
-  @@map("action_receipts")
-}
-
-// #813 — recovery case for a stuck pending action; see services/pendingRecovery.ts.
-model RecoveryCase {
-  id            String    @id
-  actionId      String    @unique @map("action_id") @db.Uuid
-  walletAddress String    @map("wallet_address")
-  actionType    String    @map("action_type")
-  state         String
-  attempts      Int       @default(0)
-  maxAttempts   Int       @map("max_attempts")
-  staleSince    DateTime  @map("stale_since") @db.Timestamptz(3)
-  detectedAt    DateTime  @map("detected_at") @db.Timestamptz(3)
-  lastAttemptAt DateTime? @map("last_attempt_at") @db.Timestamptz(3)
-  lastError     String?   @map("last_error")
-  resolution    Json?
-  version       Int       @default(1)
-  updatedAt     DateTime  @map("updated_at") @db.Timestamptz(3)
-
-  @@index([state, staleSince])
-  @@index([walletAddress])
-  @@map("recovery_cases")
-}
-
-// #815 — scoped, expiring override of an operation limit; see services/operationLimits.ts.
-model LimitOverride {
-  id         String    @id @db.Uuid
-  operation  String
-  scopeKey   String    @map("scope_key")
-  limitValue Int       @map("limit_value")
-  reason     String
-  grantedBy  String    @map("granted_by")
-  createdAt  DateTime  @map("created_at") @db.Timestamptz(3)
-  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
-  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
-  revokedBy  String?   @map("revoked_by")
-
-  @@index([operation, scopeKey, expiresAt])
-  @@map("limit_overrides")
+  @@unique([metricName, window, windowStart])
+  @@index([metricName, windowStart(sort: Desc)])
+  @@index([windowStart, windowEnd])
+  @@map("trend_aggregates")
 }

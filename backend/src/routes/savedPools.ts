@@ -51,7 +51,8 @@ export const savedPoolsRoutes = (svc: SavedPoolsService): FastifyPluginAsync =>
           opensAt: body.pool.opens_at ? new Date(body.pool.opens_at) : null,
           locksAt: body.pool.locks_at ? new Date(body.pool.locks_at) : null,
           drawsAt: body.pool.draws_at ? new Date(body.pool.draws_at) : null
-        }
+        },
+        idempotencyKey: body.idempotency_key
       });
       reply.status(result.created ? 201 : 200);
       return ok({ saved: serialize(result.record) });
