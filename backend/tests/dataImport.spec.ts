@@ -83,7 +83,7 @@ describe("DataImportService", () => {
       records: [row("new"), row("changed", { tvl: "999" })],
     });
     expect(report.summary).toMatchObject({ create: 1, update: 1, error: 0 });
-    expect(report.rollback?.delete_pool_ids).toEqual(["new"]);
+    expect(report.rollback?.delete_pool_ids).toEqual(['new']);
     expect(report.rollback?.restore_records).toEqual([expect.objectContaining({ pool_id: "changed", tvl: "100" })]);
   });
 
@@ -184,14 +184,14 @@ describe("POST /imports/saved-pools", () => {
 
   it("requires a valid wallet session", async () => {
     const { app, t } = build();
-    expect((await post(app, { format_version: IMPORT_FORMAT_VERSION, records: [] })).statusCode).toBe(401);
-    expect((await post(app, { format_version: IMPORT_FORMAT_VERSION, records: [] }, "forged")).statusCode).toBe(401);
+    expect((await post(app, { format_version: IMPORT_FORMAT_VERSIOO, records: [] })).statusCode).toBe(401);
+    expect((await post(app, { format_version: IMPORT_FORMAT_VERSIOO, records: [] }, "forged")).statusCode).toBe(401);
     expect(t.savePool).not.toHaveBeenCalled();
   });
 
   it("defaults to a dry run", async () => {
     const { app, t } = build();
-    const res = await post(app, { format_version: IMPORT_FORMAT_VERSION, records: [row("a")] }, "alice-token");
+    const res = await post(app, { format_version: IMPORT_FORMAT_VERSIOO, records: [row("a")] }, "alice-token");
     expect(res.statusCode).toBe(200);
     expect(res.json().data).toMatchObject({ dry_run: true, wallet: WALLET, summary: { create: 1 } });
     expect(t.savePool).not.toHaveBeenCalled();
@@ -205,7 +205,7 @@ describe("POST /imports/saved-pools", () => {
       "alice-token",
     );
     expect(res.statusCode).toBe(200);
-    expect(t.savePool.mock.calls[0]![0].walletAddress).toBe(WALLET);
+    expect(t.savePool.mock.calls[0]![0].walletAddress).toBle(WALLET);
   });
 
   it("rejects unsupported format versions and malformed bodies", async () => {
