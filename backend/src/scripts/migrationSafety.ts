@@ -20,6 +20,10 @@
  *
  * The database is reached through {@link MigrationDatabase} so the whole
  * framework is testable without Postgres.
+ *
+ * 4. **Release readiness** — {@link evaluateReleaseReadiness} turns a plan and
+ *    its preview into a pass/fail checklist covering tests, migration, config,
+ *    rollback, and docs, so high-risk changes can be gated in CI.
  */
 
 import * as fs from "fs";
@@ -94,6 +98,42 @@ export interface PostCheckReport {
   ok: boolean;
   checks: PostCheck[];
   failures: PostCheck[];
+}
+
+export type ReadinessCategory =
+  | "tests"
+  | "migration"
+  | "config"
+  | "rollback"
+  | "docs";
+
+export interface ReadinessItem {
+  category: ReadinessCategory;
+  name: string;
+  ok: boolean;
+  /** True when the item cannot be auto-verified and needs maintainer sign-off. */
+  manual: boolean;
+  detail: string;
+}
+
+export interface ReadinessInput {
+  plan: MigrationPlan;
+  preview?: MigrationPreview;
+  postChecks?: PostCheckReport;
+  /** Paths changed in the PR, used to detect docs/config/test updates. */
+  changedPaths?: string[];
+  /** Whether the change is being fast-tracked as an urgent fix. */
+  urgent?: boolean;
+  /** Reason recorded when an urgent fix bypasses manual items. */
+  exceptionReason?: string;
+}
+
+export interface ReadinessReport {
+  ok: boolean;
+  items: ReadinessItem[];
+  blockers: ReadinessItem[];
+  manualSignOff: ReadinessItem[];
+  exceptionApplied: boolean;
 }
 
 const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
@@ -486,6 +526,122 @@ export async function runPostChecks(db: MigrationDatabase, plan: MigrationPlan):
 
   const failures = checks.filter((c) => !c.ok);
   return { ok: failures.length === 0, checks, failures };
+}
+
+const hasPath = (paths: string[], pattern: RegExp): boolean =>
+  paths.some((p) => pattern.test(p));
+
+/**
+ * Builds the release readiness checklist for a high-risk change. Items that can
+ * be derived from the plan, preview, post-checks, or changed file paths are
+ * verified automatically; the rest are surfaced as manual sign-off items so a
+ * maintainer can confirm them before release.
+ *
+ * Urgent fixes may set `urgent: true` with an `exceptionReason`; that downgrades
+ * manual items to non-blocking but still records them for post-hoc review.
+ */
+export function evaluateReleaseReadiness(input: ReadinessInput): ReadinessReport {
+  const { plan, preview, postChecks, changedPaths = [], urgent = false, exceptionReason } = input;
+  const items: ReadinessItem[] = [];
+
+  const risky = plan.destructive.length > 0 || plan.dataChanges.length > 0;
+
+  // Tests
+  const testsUpdated = hasPath(changedPaths, /(^|\/)(__tests__|tests?|spec)\//i) ||
+    hasPath(changedPaths, /\.(test|spec)\.[tj]sx?$/i);
+  items.push({
+    category: "tests",
+    name: "Automated tests cover the change",
+    ok: testsUpdated || !risky,
+    manual: !testsUpdated && risky,
+    detail: testsUpdated
+      ? "test files included in the change"
+      : risky
+        ? "no test changes detected for a risky migration"
+        : "no risky statements; tests optional",
+  });
+
+  // Migration
+  const postOk = postChecks ? postChecks.ok : false;
+  items.push({
+    category: "migration",
+    name: "Migration plan parsed and post-checks pass",
+    ok: !plan.isEmpty && (postChecks ? postOk : true),
+    manual: !postChecks,
+    detail: plan.isEmpty
+      ? "migration contains no recognised statements"
+      : postChecks
+        ? postOk
+          ? "all post-checks passed"
+          : `${postChecks.failures.length} post-check(s) failed`
+        : "post-checks not run yet",
+  });
+
+  // Config
+  const configUpdated = hasPath(changedPaths, /(^|\/)(\.env|config|settings)/i) ||
+    hasPath(changedPaths, /\.(env|ya?ml|json|toml)$/i);
+  const needsConfig = plan.actions.some((a) => a.kind === "add-column" || a.kind === "alter-column");
+  items.push({
+    category: "config",
+    name: "Configuration and env changes documented",
+    ok: !needsConfig || configUpdated,
+    manual: needsConfig && !configUpdated,
+    detail: needsConfig
+      ? configUpdated
+        ? "config files updated alongside schema change"
+        : "schema change may require config/env updates"
+      : "no config-affecting statements",
+  });
+
+  // Rollback
+  const rollbackReady = preview ? preview.rollbackNotes.length > 0 : plan.destructive.length === 0;
+  items.push({
+    category: "rollback",
+    name: "Rollback or forward-fix plan documented",
+    ok: rollbackReady,
+    manual: plan.destructive.length > 0 && !preview,
+    detail: rollbackReady
+      ? "rollback notes available"
+      : "destructive statements without rollback notes",
+  });
+
+  // Docs
+  const docsUpdated = hasPath(changedPaths, /(^|\/)(docs?|README|CHANGELOG)/i) ||
+    hasPath(changedPaths, /\.mdx?$/i);
+  items.push({
+    category: "docs",
+    name: "Contributor and operator docs updated",
+    ok: docsUpdated || !risky,
+    manual: risky && !docsUpdated,
+    detail: docsUpdated
+      ? "documentation updated"
+      : risky
+        ? "high-risk change without doc updates"
+        : "no doc updates required",
+  });
+
+  const exceptionApplied = urgent && Boolean(exceptionReason);
+  const blockers = items.filter((i) => !i.ok && !i.manual);
+  const manualSignOff = items.filter((i) => i.manual);
+  const ok = exceptionApplied ? blockers.length === 0 : blockers.length === 0 && manualSignOff.length === 0;
+
+  return { ok, items, blockers, manualSignOff, exceptionApplied };
+}
+
+export function formatReadiness(report: ReadinessReport): string {
+  const lines: string[] = [];
+  lines.push("Release readiness checklist");
+  lines.push("===========================");
+  for (const item of report.items) {
+    const status = item.ok ? "PASS" : item.manual ? "SIGN-OFF" : "FAIL";
+    lines.push(`  [${status}] (${item.category}) ${item.name} — ${item.detail}`);
+  }
+  lines.push("");
+  if (report.exceptionApplied) {
+    lines.push("Urgent-fix exception applied; manual sign-off deferred to post-release review.");
+  }
+  lines.push(report.ok ? "Release readiness: OK" : "Release readiness: BLOCKED");
+  return lines.join("\n");
 }
 
 export function formatPreview(preview: MigrationPreview): string {

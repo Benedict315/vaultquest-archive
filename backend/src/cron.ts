@@ -1,3 +1,4 @@
+import { SearchIndexRepairService } from "./services/search/searchIndexRepairService.js";
 import cron from "node-cron";
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
@@ -636,6 +637,55 @@ export function startDataRetentionCron(opts: {
       );
     } catch (err) {
       opts.logger.error({ err }, "data retention cleanup sweep failed");
+    }
+  });
+  return task;
+}
+
+
+/**
+ * Periodically audits and repairs stale, missing, or mismatched search index records (#802).
+ * Compares primary records in the database with the discovery search index and repairs
+ * missing, stale, orphaned, and visibility-mismatched entries.
+ *
+ * Runs hourly by default, guarded by a job lease to prevent concurrent ticks across replicas.
+ */
+export function startSearchIndexRepairCron(opts: {
+  prisma: PrismaClient;
+  repairService: SearchIndexRepairService;
+  logger: Logger;
+  schedule?: string;
+  leaseTtlMs?: number;
+}): cron.ScheduledTask {
+  const schedule = opts.schedule ?? "0 * * * *"; // default: hourly
+  const leases = new LeaseService(opts.prisma);
+  const leaseTtlMs = opts.leaseTtlMs ?? 15 * 60 * 1000; // 15 minutes
+
+  const task = cron.schedule(schedule, async () => {
+    try {
+      await withJobLease(
+        leases,
+        "search-index-repair",
+        leaseTtlMs,
+        opts.logger,
+        async () => {
+          opts.logger.info("starting scheduled search index repair audit");
+          const report = await opts.repairService.runRepair();
+          opts.logger.info(
+            {
+              event: "search_index_repair.sweep_complete",
+              scannedSources: report.scannedSources,
+              scannedIndexEntries: report.scannedIndexEntries,
+              repairedCount: report.repairedCount,
+              anomalies: report.anomaliesDetected,
+              durationMs: report.durationMs,
+            },
+            `search index repair audit complete: repaired ${report.repairedCount} anomalies in ${report.durationMs}ms`,
+          );
+        },
+      );
+    } catch (err) {
+      opts.logger.error({ err }, "search index repair audit tick failed");
     }
   });
   return task;

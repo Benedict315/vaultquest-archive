@@ -1,10 +1,11 @@
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { ERROR_CODES, FINALITY_POLICY } from "../constants.js";
+import { ACTION_STATUSES, ERROR_CODES, FINALITY_POLICY, canTransition } from "../constants.js";
+import type { ActionStatus } from "../constants.js";
 import { AppError } from "../errors.js";
 import { withTelemetry } from "./telemetry.js";
 import type { IntentInput, ActionRecord } from "../types.js";
-import type { CacheService } from "./cacheService.js";
+import type { CacheService, IndexerCheckpoint } from "./cacheService.js";
 import { Amount, InvalidAmountError } from "../amount.js";
 import type { RawHorizonEvent } from "./stellarIndexer.js";
 
@@ -78,6 +79,7 @@ export interface ReconcileEventInput {
   sorobanEventId: string;
   eventPayload: unknown;
   statusHint: "confirmed" | "reverted";
+  ledger?: number;
   /**
    * Close time of the emitting ledger (#751). Used as confirmedAt so replaying
    * the same event always yields the same row; the wall-clock fallback only
@@ -138,6 +140,7 @@ function normalize(value: unknown): string | undefined {
 
 export class LedgerService {
   private onActionConfirmedCallback: ActionConfirmedCallback | null = null;
+  private readonly defaultLeaseTtlMs = 5 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -200,22 +203,20 @@ export class LedgerService {
     const expiresAt = new Date(Date.now() + (ttlMs ?? this.defaultLeaseTtlMs));
     try {
       await this.prisma.actionLease.create({
-        data: { actionId, workerId, expiresAt }
+        data: { actionId: input.actionId, workerId: input.workerId, expiresAt }
       });
       return true;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-        // Lease already exists — bump only if expired or stale.
-        const owned = await this.prisma.actionLease.findUnique({ where: { actionId } });
+        const owned = await this.prisma.actionLease.findUnique({ where: { actionId: input.actionId } });
         if (!owned || owned.expiresAt.getTime() <= Date.now()) {
           const replaced = await this.prisma.actionLease.updateMany({
-            where: { actionId, expiresAt: { lte: new Date() } },
-            data: { workerId, acquiredAt: new Date(), expiresAt }
+            where: { actionId: input.actionId, expiresAt: { lte: new Date() } },
+            data: { workerId: input.workerId, acquiredAt: new Date(), expiresAt }
           });
           return replaced.count > 0;
         }
-        // Active lease held by a different worker.
-        return false;
+        return owned.workerId === input.workerId;
       }
       throw err;
     }
@@ -288,10 +289,7 @@ export class LedgerService {
         }
 
         if (!canTransition(row.status, "submitted")) {
-          throw AppError.conflict(
-            ERROR_CODES.ILLEGAL_TRANSITION,
-            `cannot attach tx_hash to action in status ${row.status}`
-          );
+          throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, `cannot attach tx_hash to action in status ${row.status}`);
         }
 
         // Do not steal an active lease from another worker.
@@ -557,7 +555,7 @@ export class LedgerService {
     };
 
     const rows = await this.prisma.actionLedger.findMany({
-      where,
+      where: where as Prisma.ActionLedgerWhereInput,
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: limit + 1,
       ...(cursor != null && { cursor: { id: cursor }, skip: 1 })
@@ -570,81 +568,23 @@ export class LedgerService {
     return { items: items as unknown as ActionRecord[], nextCursor };
   }
 
-  async reconcileEvent(input: ReconcileEventInput): Promise<{ matched: boolean }> {
-    let shouldFireCallback = false;
-    let actionIdToCallback: string | null = null;
-    let actionTypeToCallback: string | null = null;
-
-    const outcome = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-  async getHistoryPaginated(params: {
-    walletAddress: string;
-    status?: ActionStatus;
-    type?: string;
-    skip: number;
-    limit: number;
-  }): Promise<{ items: ActionRecord[]; total: number }> {
-    const { walletAddress, status, type, skip, limit } = params;
-    
-    const whereClause: any = { walletAddress };
-    if (status) whereClause.status = status;
-    if (type) whereClause.actionType = type;
-
-    const [total, rows] = await this.prisma.$transaction([
-      this.prisma.actionLedger.count({ where: whereClause }),
-      this.prisma.actionLedger.findMany({
-        where: whereClause,
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        skip,
-        take: limit,
-      }),
-    ]);
-
-    return { items: rows as unknown as ActionRecord[], total };
-  }
-
-
   reconcileEvent(input: ReconcileEventInput): Promise<{ matched: boolean }> {
-    return withTelemetry({ operation: "action.reconcile_event", actorType: "system" }, () =>
-      this.reconcileEventImpl(input)
-    );
+    return withTelemetry({ operation: "action.reconcile_event", actorType: "system" }, () => this.reconcileEventImpl(input));
   }
 
   private async reconcileEventImpl(input: ReconcileEventInput): Promise<{ matched: boolean }> {
-    return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    let shouldFireCallback = false;
+    let actionIdToCallback: string | null = null;
+    let actionTypeToCallback: string | null = null;
+    const outcome = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const row = await tx.actionLedger.findFirst({ where: { txHash: input.txHash } });
-
       if (!row) {
-        const eventPayloadWithLedger = input.ledger
-          ? { ...(input.eventPayload as object), ledger: input.ledger }
-          : input.eventPayload;
-        await tx.pendingEvent.upsert({
-          where: { txHash: input.txHash },
-          create: {
-            txHash: input.txHash,
-            sorobanEventId: input.sorobanEventId,
-            eventPayload: eventPayloadWithLedger as object,
-            statusHint: input.statusHint
-          },
-          update: {}
-        });
-        if (this.cacheService) {
-          await this.cacheService.setPendingEvent({
-            txHash: input.txHash,
-            sorobanEventId: input.sorobanEventId,
-            eventPayload: eventPayloadWithLedger,
-            statusHint: input.statusHint,
-            ledgerClosedAt: input.ledgerClosedAt ?? null,
-            receivedAt: new Date(),
-            consumedAt: null
-          });
-        }
+        const eventPayloadWithLedger = input.ledger ? { ...(input.eventPayload as object), ledger: input.ledger } : input.eventPayload;
+        await tx.pendingEvent.upsert({ where: { txHash: input.txHash }, create: { txHash: input.txHash, sorobanEventId: input.sorobanEventId, eventPayload: eventPayloadWithLedger as object, statusHint: input.statusHint, ledgerClosedAt: input.ledgerClosedAt ?? null }, update: {} });
+        if (this.cacheService) await this.cacheService.setPendingEvent({ txHash: input.txHash, sorobanEventId: input.sorobanEventId, eventPayload: eventPayloadWithLedger, statusHint: input.statusHint, ledgerClosedAt: input.ledgerClosedAt ?? null, receivedAt: new Date(), consumedAt: null });
         return { matched: false };
       }
-
-      if (row.status === "confirmed" || row.status === "reverted") {
-        return { matched: true };
-      }
-
+      if (row.status === "confirmed" || row.status === "reverted") return { matched: true };
       const ledger = input.ledger ?? row.observedLedger;
       const confirmationDepth = row.confirmationDepth ?? FINALITY_POLICY.defaultConfirmationDepth;
       const finalizedLedger = ledger && ledger > 0 ? ledger + confirmationDepth : null;
@@ -677,15 +617,7 @@ export class LedgerService {
       await tx.actionLease.deleteMany({ where: { actionId: row.id } });
       return { matched: true };
     });
-
-    if (shouldFireCallback && actionIdToCallback && actionTypeToCallback) {
-      try {
-        this.onActionConfirmedCallback?.(actionIdToCallback, actionTypeToCallback);
-      } catch {
-        // callback errors should not break reconciliation
-      }
-    }
-
+    if (shouldFireCallback && actionIdToCallback && actionTypeToCallback) { try { this.onActionConfirmedCallback?.(actionIdToCallback, actionTypeToCallback); } catch { /* callback errors must not break reconciliation */ } }
     return outcome;
   }
 
