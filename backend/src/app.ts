@@ -174,7 +174,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // Inject CacheService into LedgerService
   const svc = new LedgerService(deps.prisma, deps.cacheService);
-  const savedPoolsSvc = new SavedPoolsService(deps.prisma);
+  const idempotencySvc = new IdempotencyService(deps.prisma);
+  const savedPoolsSvc = new SavedPoolsService(
+    deps.prisma,
+    deps.cacheService,
+    deps.categoriesCacheTtlSeconds,
+    idempotencySvc
+  );
   const metricsSvc = new MetricsService(deps.prisma);
 
   // Feature flag service for runtime toggles
@@ -300,6 +306,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const notificationSvc = new NotificationService(
     deps.prisma,
     deps.reminderLeadHours,
+    idempotencySvc
   );
   const dashboardAggregateSvc = new DashboardAggregateService(deps.prisma);
   const operationalHealthSvc = new OperationalHealthService(deps.prisma);
