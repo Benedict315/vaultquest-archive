@@ -22,6 +22,7 @@ import {
   lockupMultiplierBps,
   type ContractBehaviorError,
 } from "../lib/conformance-spec";
+import { mapContractErrorToRejection, getRejectionExplanation } from "../lib/rejectionReasons";
 
 export interface QuestMilestone {
   id: string;
@@ -80,7 +81,13 @@ export const SavingsService = {
    */
   validateDeposit(amount: number): void {
     const err = validateDepositAmount(amount);
-    if (err) throw new Error(err);
+    if (err) {
+      const rejectionReason = mapContractErrorToRejection(err);
+      const explanation = rejectionReason ? getRejectionExplanation(rejectionReason) : null;
+      const error = new Error(explanation?.userMessage || err);
+      (error as any).rejectionExplanation = explanation;
+      throw error;
+    }
   },
 
   /**
@@ -89,7 +96,13 @@ export const SavingsService = {
    */
   validateWithdrawal(participation: UserQuestParticipation, currentLedger: number): void {
     const err = validateWithdrawLockup(participation.lockedUntilLedger, currentLedger);
-    if (err) throw new Error(err);
+    if (err) {
+      const rejectionReason = mapContractErrorToRejection(err);
+      const explanation = rejectionReason ? getRejectionExplanation(rejectionReason) : null;
+      const error = new Error(explanation?.userMessage || err);
+      (error as any).rejectionExplanation = explanation;
+      throw error;
+    }
   },
 
   /**
@@ -99,7 +112,13 @@ export const SavingsService = {
    */
   claimable(participation: UserQuestParticipation, now?: number): number {
     const deadlineErr = validateClaimDeadline(participation.claimDeadline, now ?? Date.now());
-    if (deadlineErr) throw new Error(deadlineErr);
+    if (deadlineErr) {
+      const rejectionReason = mapContractErrorToRejection(deadlineErr);
+      const explanation = rejectionReason ? getRejectionExplanation(rejectionReason) : null;
+      const error = new Error(explanation?.userMessage || deadlineErr);
+      (error as any).rejectionExplanation = explanation;
+      throw error;
+    }
     const available = claimableTotal(
       participation.yieldAccrued,
       participation.prize,
