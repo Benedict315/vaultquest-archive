@@ -1,3 +1,4 @@
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -471,4 +472,53 @@ model OutboundAction {
 
   @@index([status, updatedAt])
   @@map("outbound_actions")
+}
+
+// #VaultQuest — deterministic duplicate detection for user-submitted records.
+// `duplicateKey` is a canonical, deterministic hash of the record's
+// identifying fields (see services/duplicateDetection.ts). A unique
+// constraint on (recordType, duplicateKey) blocks exact duplicates at the
+// database layer, independent of application-level checks.
+// `matchState` distinguishes exact duplicates (blocked) from ambiguous
+// near-duplicates (warned / queued for maintainer review), and
+// `reviewStatus` tracks the maintainer resolution path for ambiguous matches.
+model SubmittedRecord {
+  id             String    @id @default(uuid()) @db.Uuid
+  recordType     String    @map("record_type")
+  walletAddress  String    @map("wallet_address")
+  payload        Json
+  /// sha256 of the canonicalized identifying fields for this recordType.
+  duplicateKey   String    @map("duplicate_key")
+  /// "unique" | "exact_duplicate" | "near_duplicate" | "allowed_duplicate"
+  matchState     String    @default("unique") @map("match_state")
+  /// Similarity score (0..1) against the closest existing record, if any.
+  matchScore     Float?    @map("match_score")
+  /// Id of the existing record this one was matched against, if any.
+  matchedId      String?   @map("matched_id") @db.Uuid
+  /// "none" | "pending" | "approved" | "rejected"
+  reviewStatus   String    @default("none") @map("review_status")
+  reviewedBy     String?   @map("reviewed_by")
+  reviewedAt     DateTime? @map("reviewed_at")
+  reviewNote     String?   @map("review_note")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([recordType, duplicateKey])
+  @@index([recordType, matchState])
+  @@index([reviewStatus, createdAt(sort: Desc)])
+  @@index([walletAddress, createdAt(sort: Desc)])
+  @@index([matchedId])
+  @@map("submitted_records")
+}
+
+model DuplicateReviewAudit {
+  id          String   @id @default(uuid()) @db.Uuid
+  recordId    String   @map("record_id") @db.Uuid
+  action      String
+  actor       String
+  note        String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([recordId, createdAt(sort: Desc)])
+  @@map("duplicate_review_audits")
 }
