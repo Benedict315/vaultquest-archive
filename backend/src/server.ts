@@ -1,5 +1,6 @@
 import { buildApp } from "./app.js";
 import { PrismaJobStore } from "./worker/prismaJobStore.js";
+import { InMemoryJobStore } from "./worker/jobStore.js";
 import { getEnv } from "./env.js";
 import { getPrisma, pingDatabase } from "./db.js";
 import { createLogger } from "./logger.js";
@@ -37,7 +38,9 @@ try {
 const env = getEnv();
 const logger = createLogger(env.LOG_LEVEL);
 
-if (loadManifest && validateManifestAgainstEnv) {
+if (env.SANDBOX_MODE) {
+  logger.warn("Sandbox mode enabled: live network, Redis, backup, replay, and scheduled integrations are disabled");
+} else if (loadManifest && validateManifestAgainstEnv) {
   try {
     const manifest = loadManifest(env.DEPLOYMENT_MANIFEST_PATH);
     const mismatches = validateManifestAgainstEnv(manifest);
@@ -74,7 +77,7 @@ if (loadManifest && validateManifestAgainstEnv) {
 const prisma = getPrisma(env.DATABASE_URL);
 
 // Initialize Cache Service (pointing to REDIS_URL if set, otherwise defaults to local Redis)
-const cacheService = new CacheService(prisma, logger, process.env.REDIS_URL);
+const cacheService = new CacheService(prisma, logger, env.SANDBOX_MODE ? undefined : process.env.REDIS_URL);
 
 const app = buildApp({
   prisma,
@@ -84,7 +87,9 @@ const app = buildApp({
   cacheService,
   categoriesCacheTtlSeconds: env.CATEGORIES_CACHE_TTL_SECONDS,
   reminderLeadHours: env.REMINDER_LEAD_HOURS,
-  jobStore: env.WORKER_ENABLED ? new PrismaJobStore(prisma) : undefined,
+  jobStore: env.WORKER_ENABLED
+    ? env.SANDBOX_MODE ? new InMemoryJobStore() : new PrismaJobStore(prisma)
+    : undefined,
   jobWorkerPollIntervalMs: env.WORKER_POLL_INTERVAL_MS,
   // #812–#815
   receiptSigningSecret: env.RECEIPT_SIGNING_SECRET,
@@ -102,25 +107,25 @@ const app = buildApp({
 });
 
 // Periodic write-behind sync task: sync checkpoint from cache to PostgreSQL database every 15 seconds
-const cacheSyncInterval = setInterval(async () => {
+const cacheSyncInterval = env.SANDBOX_MODE ? undefined : setInterval(async () => {
   try {
     await cacheService.syncCheckpointToDb();
   } catch (err) {
     logger.error({ err }, "failed to sync indexer checkpoint from cache");
   }
 }, 15000);
-cacheSyncInterval.unref();
+cacheSyncInterval?.unref();
 
-const cronTask = startReconcilerCron({
+const cronTask = env.SANDBOX_MODE ? undefined : startReconcilerCron({
   prisma,
   ttlMinutes: env.ORPHAN_TTL_MINUTES,
   logger
 });
 
-const questCronTask = startQuestCron({ prisma, logger });
+const questCronTask = env.SANDBOX_MODE ? undefined : startQuestCron({ prisma, logger });
 
 // Maturity / claim-window reminder notifications (issue #446).
-const notificationCronTask = startNotificationReminderCron({
+const notificationCronTask = env.SANDBOX_MODE ? undefined : startNotificationReminderCron({
   prisma,
   leadHours: env.REMINDER_LEAD_HOURS,
   logger
@@ -129,7 +134,7 @@ const notificationCronTask = startNotificationReminderCron({
 // Stellar indexer daemon (#indexer). Only started when a Soroban RPC endpoint
 // and at least one contract id are configured.
 let indexerCronTask: ScheduledTask | undefined;
-if (env.SOROBAN_RPC_URL && env.INDEXER_CONTRACT_IDS) {
+if (!env.SANDBOX_MODE && env.SOROBAN_RPC_URL && env.INDEXER_CONTRACT_IDS) {
   const staticContractIds = env.INDEXER_CONTRACT_IDS.split(",").map((s) => s.trim()).filter(Boolean);
   const indexerLedgerService = new LedgerService(prisma, cacheService);
   const indexer = new StellarIndexer({
@@ -170,7 +175,7 @@ if (env.SOROBAN_RPC_URL && env.INDEXER_CONTRACT_IDS) {
 
 // Automated database backup cron (#275). Only started when BACKUP_DIR is set.
 let backupCronTask: ScheduledTask | undefined;
-if (env.BACKUP_DIR) {
+if (!env.SANDBOX_MODE && env.BACKUP_DIR) {
   backupCronTask = startBackupCron({
     backupDir: env.BACKUP_DIR,
     databaseUrl: env.DATABASE_URL,
@@ -187,7 +192,7 @@ if (env.BACKUP_DIR) {
 
 // Replay-equivalence job (#751). Only started when a scratch database is set.
 let replayCronTask: ScheduledTask | undefined;
-if (env.REPLAY_DATABASE_URL) {
+if (!env.SANDBOX_MODE && env.REPLAY_DATABASE_URL) {
   if (isSameDatabase(env.DATABASE_URL, env.REPLAY_DATABASE_URL)) {
     logger.fatal("REPLAY_DATABASE_URL points at the live database; it is truncated on every run — refusing to start");
     process.exit(1);
@@ -205,10 +210,10 @@ if (env.REPLAY_DATABASE_URL) {
 
 async function shutdown(signal: string) {
   logger.info({ signal }, "shutting down");
-  clearInterval(cacheSyncInterval);
-  cronTask.stop();
-  questCronTask.stop();
-  notificationCronTask.stop();
+  if (cacheSyncInterval) clearInterval(cacheSyncInterval);
+  cronTask?.stop();
+  questCronTask?.stop();
+  notificationCronTask?.stop();
   indexerCronTask?.stop();
   backupCronTask?.stop();
   replayCronTask?.stop();

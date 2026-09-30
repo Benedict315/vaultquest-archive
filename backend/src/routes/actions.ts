@@ -5,6 +5,7 @@ import type { LedgerService } from "../services/ledger.js";
 import {
   createActionBody,
   attachTxBody,
+  actionCheckpointBody,
   cancelBody,
   listQuery,
   dashboardQuery,
@@ -29,6 +30,17 @@ export type ActionLifecycleHooks = {
 
 function serialize(row: Awaited<ReturnType<LedgerService["getAction"]>>) {
   if (!row) return null;
+  const checkpoint = row.recoveryCheckpoint as { stage?: string } | null;
+  const nextAction = row.status === "confirmed" || row.status === "failed" || row.status === "reverted"
+    ? "none"
+    : row.status === "pending" && checkpoint?.stage === "intent_recorded"
+      ? "continue_wallet_approval"
+      : "verify_wallet_or_chain_before_retry";
+  const recoveryMessage = nextAction === "continue_wallet_approval"
+    ? "Continue this action using its existing idempotency key."
+    : nextAction === "verify_wallet_or_chain_before_retry"
+      ? "Verify wallet or chain activity before starting another action. Do not resubmit this operation."
+      : "No recovery action is required.";
   return {
     id: row.id,
     idempotency_key: row.idempotencyKey,
@@ -42,6 +54,11 @@ function serialize(row: Awaited<ReturnType<LedgerService["getAction"]>>) {
     error_code: row.errorCode,
     error_detail: row.errorDetail,
     retry_count: row.retryCount,
+    recovery: {
+      checkpoint: row.recoveryCheckpoint,
+      next_action: nextAction,
+      message: recoveryMessage
+    },
     created_at: row.createdAt,
     updated_at: row.updatedAt,
     submitted_at: row.submittedAt,
@@ -99,6 +116,11 @@ export const actionsRoutes = (
       req.log.info({ txHash: body.tx_hash, actionId: result.id, status: result.status }, "action tx_hash attached");
       await notify(result, req.log);
       return ok(serialize(result));
+    });
+
+    app.post<{ Params: { id: string } }>("/actions/:id/checkpoint", async (req) => {
+      actionCheckpointBody.parse(req.body);
+      return ok(serialize(await svc.markExternalActionStarted(req.params.id)));
     });
 
     app.post<{ Params: { id: string } }>("/actions/:id/cancel", async (req) => {

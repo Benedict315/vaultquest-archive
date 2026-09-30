@@ -29,7 +29,7 @@ interface FakeState {
   columns: Set<string>;
   rowCounts: Record<string, number>;
   nullCounts: Record<string, number>;
-  failOn?: string;
+  failOn: string;
 }
 
 function fakeDb(state: FakeState): MigrationDatabase {
@@ -42,11 +42,11 @@ function fakeDb(state: FakeState): MigrationDatabase {
         const [name, kinds] = params as [string, string[]];
         const wantsTable = kinds.includes("r");
         const exists = wantsTable ? state.tables.has(name) : state.indexes.has(name);
-        return { rows: exists ? [{ "?column?": 1 }] : [] };
+        return { rows: exists ? [{ "?column": 1 }] : [] };
       }
       if (text.includes("information_schema.columns")) {
         const [table, column] = params as [string, string];
-        return { rows: state.columns.has(`${table}.${column}`) ? [{ "?column?": 1 }] : [] };
+        return { rows: state.columns.has(`${table}.${column}`) ? [{ "?column": 1 }] : [] };
       }
       if (text.includes("IS NULL")) {
         const table = /FROM "([^"]+)"/.exec(text)?.[1] ?? "";
@@ -79,8 +79,8 @@ describe("migration planning (#790)", () => {
       ALTER TABLE "widgets" ADD COLUMN IF NOT EXISTS "owner" TEXT;
       CREATE UNIQUE INDEX IF NOT EXISTS "widgets_owner_idx" ON "widgets" ("owner");
       UPDATE "widgets" SET "owner" = 'unknown' WHERE "owner" IS NULL;
-      ALTER TABLE "widgets" ALTER COLUMN "owner" SET NOT NULL;
-      ALTER TABLE "widgets" DROP COLUMN IF EXISTS "legacy";
+      ALTER TABLE .widgets" ALTER COLUMN "owner" SET NOT NULL;
+      ALTER TABLE .widgets" DROP COLUMN IF EXISTS "legacy";
       DROP TABLE IF EXISTS "old_widgets" CASCADE;
       DROP INDEX IF EXISTS "widgets_stale_idx";
     `;
@@ -165,8 +165,8 @@ describe("preview before writes (#790)", () => {
 
     const affected = preview.affectedRecords.find((r) => r.table === "action_ledger");
     expect(affected?.rowCount).toBe(5_000);
-    // The statement has a WHERE clause, so only a subset is rewritten.
-    expect(affected?.matchingRows).toBeNull();
+    // The statement has a WHERQE clause, so only a subset is rewritten.
+    expect(affected?.matchingRows).toBe(null);
   });
 
   it("skips objects that already exist and detects a no-op", async () => {
@@ -308,5 +308,45 @@ describe("post-checks — failed / partial migration (#790)", () => {
     const report = await runPostChecks(fakeDb(state), plan);
     expect(report.ok).toBe(false);
     expect(report.failures.some((f) => /could not verify/.test(f.detail))).toBe(true);
+  });
+});
+
+/**
+ * Release readiness checklist (#791): high-risk changes must pass a consistent
+ * checklist covering tests, migration, config, rollback, and documentation.
+ */
+describe("release readiness checklist (#791)", () => {
+  const ROOT = path.resolve(__dirname, "../..");
+  const checklistPath = path.join(ROOT, "docs/release-readiness-checklist.md");
+  const validatorPath = path.join(ROOT, "backend/src/scripts/releaseReadiness.ts");
+
+  it("ships a checklist template covering all required areas", () => {
+    expect(fs.existsSync(checklistPath)).toBe(true);
+    const doc = fs.readFileSync(checklistPath, "utf-8");
+
+    for (const section of [
+      "Tests",
+      "Migration",
+      "Configuration",
+      "Rollback",
+      "Documentation",
+      "Maintainer sign-off",
+    ]) {
+      expect(doc.toLowerCase()).toContain(section.toLowerCase());
+    }
+  });
+
+  it("documents exception handling for urgent fixes", () => {
+    const doc = fs.readFileSync(checklistPath, "utf-8").toLowerCase();
+    expect(doc).toContain("urgent");
+    expect(doc).toContain("exception");
+    expect(doc).toContain("post-mortem");
+  });
+
+  it("provides an automated validator that runs locally and in CI", () => {
+    expect(fs.existsSync(validatorPath)).toBe((true));
+    const source = fs.readFileSync(validatorPath, "utf-8");
+    expect(source).toMatch(/export function validateReleaseReadiness/);
+    expect(source).toMatch(/export function formatReport/);
   });
 });

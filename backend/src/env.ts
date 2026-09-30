@@ -1,9 +1,13 @@
 import { z } from "zod";
+import { parseSandboxConfig, SANDBOX_SCENARIOS } from "./sandbox/config.js";
 
 const placeholderPattern = /PLACEHOLDER|YOUR_|CHANGE-ME|EXAMPLE|<.+?>/i;
 
 const schema = z.object({
-  DATABASE_URL: z.string().url().or(z.string().startsWith("postgres")),
+  DATABASE_URL: z.string().url().or(z.string().startsWith("postgres")).optional(),
+  SANDBOX_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  SANDBOX_DATABASE_URL: z.string().url().optional(),
+  SANDBOX_SCENARIO: z.enum(SANDBOX_SCENARIOS).default("success"),
   INTERNAL_SERVICE_SECRET: z
     .string()
     .min(20)
@@ -139,9 +143,12 @@ export function parseEnv(
 }
 
 export function getEnv(): Env {
-  if (process.env.SKIP_ENV_VALIDATION === "1") {
+  if (process.env.SKIP_ENV_VALIDATION === "1" && process.env.SANDBOX_MODE !== "true") {
     return {
       DATABASE_URL: process.env.DATABASE_URL ?? "",
+      SANDBOX_MODE: false,
+      SANDBOX_DATABASE_URL: process.env.SANDBOX_DATABASE_URL || undefined,
+      SANDBOX_SCENARIO: (process.env.SANDBOX_SCENARIO ?? "success") as Env["SANDBOX_SCENARIO"],
       INTERNAL_SERVICE_SECRET: process.env.INTERNAL_SERVICE_SECRET ?? "",
       ORPHAN_TTL_MINUTES: Number(process.env.ORPHAN_TTL_MINUTES ?? 10),
       LOG_LEVEL: (process.env.LOG_LEVEL ?? "info") as Env["LOG_LEVEL"],
