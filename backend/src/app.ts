@@ -50,36 +50,8 @@ import { exportsRoutes } from "./routes/exports.js";
 import { importsRoutes } from "./routes/imports.js";
 import { OperationalHealthService } from "./services/operationalHealthService.js";
 import { operationalHealthRoutes } from "./routes/operationalHealth.js";
-// #812–#815: receipts, stuck-pending recovery, audit trail, operation limits.
-import { AuditTrailService, type AuditTrailStore } from "./services/auditTrail.js";
-import { ReceiptService, StellarReceiptSigner } from "./services/receipts.js";
-import { PendingRecoveryService } from "./services/pendingRecovery.js";
-import {
-  InMemoryLimitCounterStore,
-  OperationLimitService,
-  RedisLimitCounterStore,
-  resolveOperationPolicies,
-  type RedisLikeClient,
-} from "./services/operationLimits.js";
-import {
-  PrismaAuditTrailStore,
-  PrismaLimitOverrideStore,
-  PrismaReceiptStore,
-  PrismaRecoveryCaseStore,
-  ledgerRecoveryAdapter,
-  prismaPendingActionSource,
-  prismaReceiptActionSource,
-} from "./services/governanceStores.js";
-import {
-  bodyWallet,
-  chainPreHandlers,
-  enforceOperationLimit,
-  operationLimitsHook,
-} from "./middleware/operationLimit.js";
-import { receiptsRoutes } from "./routes/receipts.js";
-import { recoveryRoutes } from "./routes/recovery.js";
-import { auditTrailRoutes } from "./routes/auditTrail.js";
-import { operationLimitsRoutes } from "./routes/operationLimits.js";
+import { TrendAggregationService } from "./services/trendAggregationService.js";
+import { trendAggregationRoutes } from "./routes/trendAggregation.js";
 
 export type AppDeps = {
   prisma: PrismaClient;
@@ -202,7 +174,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // Inject CacheService into LedgerService
   const svc = new LedgerService(deps.prisma, deps.cacheService);
-  const savedPoolsSvc = new SavedPoolsService(deps.prisma);
+  const idempotencySvc = new IdempotencyService(deps.prisma);
+  const savedPoolsSvc = new SavedPoolsService(
+    deps.prisma,
+    deps.cacheService,
+    deps.categoriesCacheTtlSeconds,
+    idempotencySvc
+  );
   const metricsSvc = new MetricsService(deps.prisma);
 
   // Feature flag service for runtime toggles
@@ -328,10 +306,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const notificationSvc = new NotificationService(
     deps.prisma,
     deps.reminderLeadHours,
+    idempotencySvc
   );
   const dashboardAggregateSvc = new DashboardAggregateService(deps.prisma);
   const operationalHealthSvc = new OperationalHealthService(deps.prisma);
-  const publicActivitySvc = new PublicActivityService(deps.prisma);
+  const trendAggregationSvc = new TrendAggregationService(deps.prisma);
 
   // Register routes (healthRoutes already includes /health endpoint)
   app.register(
@@ -371,6 +350,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     }),
   );
   app.register(dashboardAggregatesRoutes(dashboardAggregateSvc, apiKeyGuard));
+  app.register(trendAggregationRoutes(trendAggregationSvc, apiKeyGuard));
 
   // Permission-aware search indexing & repair (#802)
   const searchIndexSvc =
