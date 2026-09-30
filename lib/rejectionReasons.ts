@@ -75,6 +75,12 @@ export const VAULT_REJECTION_REASONS = {
   NOT_PARTICIPANT: "VAULT_NOT_PARTICIPANT",
   INSUFFICIENT_YIELD_RESERVE: "VAULT_INSUFFICIENT_YIELD_RESERVE",
   INVALID_ACTION_STATE: "VAULT_INVALID_ACTION_STATE",
+  /**
+   * A pool/vault lifecycle transition was attempted that is not a legal edge
+   * in the state machine (#763). Must stay in sync with
+   * `POOL_TRANSITION_REASON_CODE` in `lib/pool-lifecycle.ts`.
+   */
+  INVALID_STATE_TRANSITION: "VAULT_INVALID_STATE_TRANSITION",
 
   // Stale state issues
   STALE_POOL_DATA: "VAULT_STALE_POOL_DATA",
@@ -288,6 +294,14 @@ export const REJECTION_EXPLANATIONS: Record<VaultRejectionReason, RejectionExpla
     recoveryHint: "Refresh the pool status and try again. If the issue persists, contact support.",
     retryable: false,
     technicalContext: "Action not valid for current pool round state",
+  },
+  [VAULT_REJECTION_REASONS.INVALID_STATE_TRANSITION]: {
+    reasonCode: VAULT_REJECTION_REASONS.INVALID_STATE_TRANSITION,
+    category: "policy",
+    userMessage: "This pool status change is not allowed from its current state.",
+    recoveryHint: "Refresh the pool status and choose an action that is valid for the current state.",
+    retryable: false,
+    technicalContext: "Rejected pool lifecycle transition - edge not defined in POOL_TRANSITIONS",
   },
 
   // Stale state issues
