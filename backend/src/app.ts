@@ -50,8 +50,36 @@ import { exportsRoutes } from "./routes/exports.js";
 import { importsRoutes } from "./routes/imports.js";
 import { OperationalHealthService } from "./services/operationalHealthService.js";
 import { operationalHealthRoutes } from "./routes/operationalHealth.js";
-import { activityRoutes } from "./routes/activity.js";
-import { PublicActivityService } from "./services/publicActivity.js";
+// #812–#815: receipts, stuck-pending recovery, audit trail, operation limits.
+import { AuditTrailService, type AuditTrailStore } from "./services/auditTrail.js";
+import { ReceiptService, StellarReceiptSigner } from "./services/receipts.js";
+import { PendingRecoveryService } from "./services/pendingRecovery.js";
+import {
+  InMemoryLimitCounterStore,
+  OperationLimitService,
+  RedisLimitCounterStore,
+  resolveOperationPolicies,
+  type RedisLikeClient,
+} from "./services/operationLimits.js";
+import {
+  PrismaAuditTrailStore,
+  PrismaLimitOverrideStore,
+  PrismaReceiptStore,
+  PrismaRecoveryCaseStore,
+  ledgerRecoveryAdapter,
+  prismaPendingActionSource,
+  prismaReceiptActionSource,
+} from "./services/governanceStores.js";
+import {
+  bodyWallet,
+  chainPreHandlers,
+  enforceOperationLimit,
+  operationLimitsHook,
+} from "./middleware/operationLimit.js";
+import { receiptsRoutes } from "./routes/receipts.js";
+import { recoveryRoutes } from "./routes/recovery.js";
+import { auditTrailRoutes } from "./routes/auditTrail.js";
+import { operationLimitsRoutes } from "./routes/operationLimits.js";
 
 export type AppDeps = {
   prisma: PrismaClient;
@@ -72,8 +100,18 @@ export type AppDeps = {
    */
   jobStore?: JobStore;
   jobWorkerPollIntervalMs?: number;
-  searchIndexService?: SearchIndexService;
-  searchIndexRepairService?: SearchIndexRepairService;
+  /** #812: Stellar secret seed that signs receipts; an ephemeral key is used when unset. */
+  receiptSigningSecret?: string;
+  /** #812: retired receipt public keys still accepted for verification. */
+  receiptPreviousPublicKeys?: string[];
+  /** #813: how long an in-flight action may sit untouched before it is stuck. */
+  pendingStaleThresholdMs?: number;
+  /** #813: automatic retries before a recovery case becomes `failed`. */
+  recoveryMaxAttempts?: number;
+  /** #815: OPERATION_LIMITS JSON override. */
+  operationLimits?: string;
+  /** #814: audit trail storage; defaults to the Prisma table. */
+  auditTrailStore?: AuditTrailStore;
 };
 
 declare module "fastify" {
@@ -222,7 +260,61 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // Guard is a no-op when apiKey is undefined (local dev without configuration).
   const apiKeyGuard = requireApiKey(deps.apiKey);
 
-  const walletAuthSvc = new WalletAuthService(deps.prisma);
+  // ── #812–#815 ───────────────────────────────────────────────────────────
+  // One shared, hash-chained audit trail (#814). Access changes, recovery
+  // transitions (#813) and limit overrides (#815) are all written to it.
+  const auditTrail = new AuditTrailService(
+    deps.auditTrailStore ?? new PrismaAuditTrailStore(deps.prisma),
+  );
+
+  // #815: counters live in Redis when available so every replica enforces
+  // the same limits; otherwise per process.
+  const redisForLimits = deps.cacheService?.redisClient as unknown as RedisLikeClient | null | undefined;
+  const operationLimits = new OperationLimitService({
+    policies: resolveOperationPolicies(deps.operationLimits),
+    counters: redisForLimits
+      ? new RedisLimitCounterStore(redisForLimits)
+      : new InMemoryLimitCounterStore(),
+    overrides: new PrismaLimitOverrideStore(deps.prisma),
+    audit: auditTrail,
+  });
+  // Public routes without a permission guard are limited here (method +
+  // route pattern); guarded routes chain enforceOperationLimit after the guard.
+  app.addHook(
+    "preHandler",
+    operationLimitsHook(operationLimits, [
+      { method: "POST", url: "/actions", operation: "action.create", walletHint: bodyWallet("wallet_address") },
+      { method: "POST", url: "/wallet-auth/challenge", operation: "wallet_auth.challenge" },
+    ]),
+  );
+
+  // #812: signed receipts for critical operations.
+  const receiptSvc = new ReceiptService({
+    store: new PrismaReceiptStore(deps.prisma),
+    signer: deps.receiptSigningSecret
+      ? StellarReceiptSigner.fromSecret(deps.receiptSigningSecret)
+      : StellarReceiptSigner.ephemeral(),
+    actions: prismaReceiptActionSource(deps.prisma),
+    previousKeyIds: deps.receiptPreviousPublicKeys,
+  });
+  if (receiptSvc.ephemeralKey) {
+    loggerInstance.warn(
+      { keyId: receiptSvc.keyId },
+      "RECEIPT_SIGNING_SECRET is not set: receipts are signed with an ephemeral key and stop verifying after a restart",
+    );
+  }
+
+  // #813: stuck pending-action recovery.
+  const recoverySvc = new PendingRecoveryService({
+    store: new PrismaRecoveryCaseStore(deps.prisma),
+    actions: prismaPendingActionSource(deps.prisma),
+    ledger: ledgerRecoveryAdapter(svc),
+    audit: auditTrail,
+    staleAfterMs: deps.pendingStaleThresholdMs,
+    maxAttempts: deps.recoveryMaxAttempts,
+  });
+
+  const walletAuthSvc = new WalletAuthService(deps.prisma, auditTrail);
   const walletPrincipal = walletSessionResolver(
     walletAuthSvc,
     deps.adminWalletAddresses ?? [],
@@ -241,8 +333,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const publicActivitySvc = new PublicActivityService(deps.prisma);
 
   // Register routes (healthRoutes already includes /health endpoint)
-  app.register(actionsRoutes(svc, apiKeyGuard));
-  app.register(activityRoutes(publicActivitySvc, requirePermission("own.data.read", [walletPrincipal])));
+  app.register(
+    actionsRoutes(svc, apiKeyGuard, {
+      onActionChanged: (action) => receiptSvc.issueForAction(action),
+    }),
+  );
   app.register(walletAuthRoutes(walletAuthSvc));
   app.register(healthRoutes(svc));
   app.register(savedPoolsRoutes(savedPoolsSvc));
@@ -252,6 +347,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       svc,
       deps.internalSecret,
       new TransactionTraceService(deps.prisma),
+      { onReconciled: (txHash) => receiptSvc.issueForTxHash(txHash) },
     ),
   );
   app.register(reconciliationRoutes(deps.prisma, deps.internalSecret));
@@ -303,14 +399,55 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(
     exportsRoutes(
       exportSvc,
-      requirePermission("own.data.export", [walletPrincipal]),
+      chainPreHandlers(
+        requirePermission("own.data.export", [walletPrincipal]),
+        enforceOperationLimit(operationLimits, "data.export"),
+      ),
     ),
   );
   app.register(
     importsRoutes(
       new DataImportService(savedPoolsSvc),
-      requirePermission("own.data.import", [walletPrincipal]),
+      chainPreHandlers(
+        requirePermission("own.data.import", [walletPrincipal]),
+        enforceOperationLimit(operationLimits, "data.import"),
+      ),
     ),
+  );
+
+  // #812–#815 routes. Every privileged route re-checks permissions server-side.
+  app.register(
+    receiptsRoutes(receiptSvc, {
+      read: requirePermission("own.receipts.read", [walletPrincipal]),
+      admin: requirePermission("admin.receipts.read", [walletPrincipal]),
+      verifyLimit: enforceOperationLimit(operationLimits, "receipt.verify"),
+    }),
+  );
+  app.register(
+    recoveryRoutes(recoverySvc, {
+      ownRead: requirePermission("own.data.read", [walletPrincipal]),
+      ownRetry: chainPreHandlers(
+        requirePermission("own.data.read", [walletPrincipal]),
+        enforceOperationLimit(operationLimits, "recovery.retry"),
+      ),
+      adminRead: requirePermission("admin.recovery.read", [walletPrincipal]),
+      adminWrite: requirePermission("admin.recovery.write", [walletPrincipal]),
+    }),
+  );
+  app.register(
+    auditTrailRoutes(auditTrail, {
+      read: requirePermission("admin.audit_trail.read", [walletPrincipal]),
+      export: chainPreHandlers(
+        requirePermission("admin.audit_trail.export", [walletPrincipal]),
+        enforceOperationLimit(operationLimits, "audit.export"),
+      ),
+    }),
+  );
+  app.register(
+    operationLimitsRoutes(operationLimits, {
+      read: requirePermission("admin.limits.read", [walletPrincipal]),
+      write: requirePermission("admin.limits.write", [walletPrincipal]),
+    }),
   );
 
   // Central Error Handler Middleware

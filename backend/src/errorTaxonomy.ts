@@ -130,6 +130,15 @@ export const ERROR_CATALOG: Record<ErrorCode, ErrorDescriptor> = {
     recovery: "Wait a moment (see the Retry-After header) and try again.",
     exposeMessage: true
   },
+  // #815 — the message names the operation, limit and remediation, and
+  // `details` carries retry_after_seconds / reset_at; nothing internal.
+  [ERROR_CODES.OPERATION_LIMIT_EXCEEDED]: {
+    category: "rate_limit",
+    retryable: true,
+    userMessage: "You have reached the limit for this operation.",
+    recovery: "Wait until the limit resets (see the Retry-After header), or follow the remediation in the error details.",
+    exposeMessage: true
+  },
   [ERROR_CODES.INVALID_CURSOR]: {
     category: "validation",
     retryable: false,

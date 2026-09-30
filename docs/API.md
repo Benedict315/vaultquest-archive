@@ -614,6 +614,7 @@ An unexpected server failure (the cause is logged under `error_id`, never return
 | `TX_HASH_ALREADY_ATTACHED` | conflict | no | 409 | `tx_hash` already belongs to an action |
 | `CONFLICT` | conflict | no | 409 | Unique-constraint conflict |
 | `RATE_LIMIT_EXCEEDED` | rate_limit | yes | 429 | Too many requests; honour `Retry-After` |
+| `OPERATION_LIMIT_EXCEEDED` | rate_limit | yes | 429 | Policy limit on an expensive operation (#815); `details` has `operation`, `limit`, `retry_after_seconds`, `reset_at`, `remediation` — see [backend/docs/RECEIPTS_RECOVERY_AUDIT_LIMITS.md](../backend/docs/RECEIPTS_RECOVERY_AUDIT_LIMITS.md) |
 | `WALLET_REJECTED` | wallet | yes | — | Wallet declined the request (recorded on the action as `error_code`) |
 | `WALLET_TIMEOUT` | wallet | yes | — | Wallet did not respond in time |
 | `NETWORK_ERROR` | dependency | yes | — | Stellar network unreachable |
