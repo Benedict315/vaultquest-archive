@@ -15,11 +15,14 @@
  */
 
 import {
-  BusinessPolicyEngine,
-  BusinessPolicyError,
-  type BusinessPolicyOverrides,
-} from "../lib/business-policy";
-import { claimableTotal, type ContractBehaviorError } from "../lib/conformance-spec";
+  validateDepositAmount,
+  validateWithdrawLockup,
+  validateClaimDeadline,
+  claimableTotal,
+  lockupMultiplierBps,
+  type ContractBehaviorError,
+} from "../lib/conformance-spec";
+import { mapContractErrorToRejection, getRejectionExplanation } from "../lib/rejectionReasons";
 
 export interface QuestMilestone {
   id: string;
@@ -84,7 +87,14 @@ export function createSavingsService(policyOverrides: BusinessPolicyOverrides = 
    * @throws Error with message `InvalidAmount` when `amount <= 0`.
    */
   validateDeposit(amount: number): void {
-    assertAllowed(policy.evaluate({ rule: "deposit", amount }));
+    const err = validateDepositAmount(amount);
+    if (err) {
+      const rejectionReason = mapContractErrorToRejection(err);
+      const explanation = rejectionReason ? getRejectionExplanation(rejectionReason) : null;
+      const error = new Error(explanation?.userMessage || err);
+      (error as any).rejectionExplanation = explanation;
+      throw error;
+    }
   },
 
   /**
@@ -92,11 +102,14 @@ export function createSavingsService(policyOverrides: BusinessPolicyOverrides = 
    * `withdraw`'s `LockupActive` guard.
    */
   validateWithdrawal(participation: UserQuestParticipation, currentLedger: number): void {
-    assertAllowed(policy.evaluate({
-      rule: "withdrawal",
-      lockedUntilLedger: participation.lockedUntilLedger,
-      currentLedger
-    }));
+    const err = validateWithdrawLockup(participation.lockedUntilLedger, currentLedger);
+    if (err) {
+      const rejectionReason = mapContractErrorToRejection(err);
+      const explanation = rejectionReason ? getRejectionExplanation(rejectionReason) : null;
+      const error = new Error(explanation?.userMessage || err);
+      (error as any).rejectionExplanation = explanation;
+      throw error;
+    }
   },
 
   /**
@@ -105,6 +118,14 @@ export function createSavingsService(policyOverrides: BusinessPolicyOverrides = 
    * the claim deadline has already passed.
    */
   claimable(participation: UserQuestParticipation, now?: number): number {
+    const deadlineErr = validateClaimDeadline(participation.claimDeadline, now ?? Date.now());
+    if (deadlineErr) {
+      const rejectionReason = mapContractErrorToRejection(deadlineErr);
+      const explanation = rejectionReason ? getRejectionExplanation(rejectionReason) : null;
+      const error = new Error(explanation?.userMessage || deadlineErr);
+      (error as any).rejectionExplanation = explanation;
+      throw error;
+    }
     const available = claimableTotal(
       participation.yieldAccrued,
       participation.prize,
