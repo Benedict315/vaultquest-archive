@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TimelineStage } from "../../components/TransactionTimeline";
-import type { PoolActionInput, PoolActionType, VaultContractClient } from "../contract/types";
+import { ContractInterfaceError, type PoolActionInput, type PoolActionType, type VaultContractClient } from "../contract/types";
 import { assertNetworkMatchesBeforeSigning, assertNotMultisigBeforeSigning } from "../../core/walletService.js";
 import { assertSessionAliveBeforeSigning } from "../../core/sessionLiveness.js";
 import { mapWalletErrorToRejection, getRejectionExplanation } from "../../../../lib/rejectionReasons.js";
@@ -52,6 +52,16 @@ export interface TxFlowResult {
 }
 
 export interface TxFlowOptions {
+  /** Business rules applied before the wallet can display a signing prompt. */
+  businessPolicy?: BusinessPolicyEngine;
+  /** Live rule context supplied by the vault view when lockup/claim data is available. */
+  policyContext?: {
+    lockedUntilLedger?: number;
+    currentLedger?: number;
+    claimableAmount?: number;
+    claimDeadline?: number | null;
+    now?: number;
+  };
   /** Called after ledger confirmation and before the indexing stage. */
   onConfirmed?: (txHash: string) => void;
   /**
@@ -375,6 +385,30 @@ export function useTxFlow(): TxFlowResult {
       } = options;
 
       try {
+        const policy = options.businessPolicy ?? DEFAULT_BUSINESS_POLICY_ENGINE;
+        let decision;
+        if (["create", "join", "drip"].includes(type) && input.amount !== undefined) {
+          decision = policy.evaluate({ rule: "deposit", amount: Number(input.amount) });
+        } else if (type === "withdraw") {
+          decision = policy.evaluate({
+            rule: "withdrawal",
+            ...(input.amount !== undefined && { amount: Number(input.amount) }),
+            ...(options.policyContext?.lockedUntilLedger !== undefined && { lockedUntilLedger: options.policyContext.lockedUntilLedger }),
+            ...(options.policyContext?.currentLedger !== undefined && { currentLedger: options.policyContext.currentLedger })
+          });
+        } else if (type === "claim" && options.policyContext?.claimableAmount !== undefined) {
+          decision = policy.evaluate({
+            rule: "claim",
+            availableAmount: options.policyContext.claimableAmount,
+            deadline: options.policyContext.claimDeadline,
+            now: options.policyContext.now ?? Date.now()
+          });
+        }
+        if (decision?.status === "deny") {
+          const kind = decision.code === "LockupActive" ? "lockup_active" : "contract_error";
+          throw new ContractInterfaceError(kind, `${decision.code}: ${decision.message}`);
+        }
+
         // #735: fresh network check immediately before every signing
         // request — never cached from connect time. Throws before the
         // wallet's signing prompt is shown on a mismatch.

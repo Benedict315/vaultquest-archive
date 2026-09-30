@@ -1,3 +1,4 @@
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -68,6 +69,7 @@ model ActionLedger {
   finalizedLedger   Int?         @map("finalized_ledger")
   confirmationDepth Int?         @map("confirmation_depth")
   compensatesId     String?      @map("compensates_id")
+  recoveryCheckpoint Json?       @map("recovery_checkpoint")
 
   @@index([walletAddress, createdAt(sort: Desc)])
   @@index([status, updatedAt])
@@ -471,4 +473,86 @@ model OutboundAction {
 
   @@index([status, updatedAt])
   @@map("outbound_actions")
+}
+
+// #814 — append-only, hash-chained audit trail. UPDATE/DELETE/TRUNCATE are
+// rejected by a trigger (see migration 20260929000000); see services/auditTrail.ts.
+model AuditTrailRecord {
+  id             String   @id @db.Uuid
+  sequence       Int      @unique
+  category       String
+  action         String
+  actorSubject   String   @map("actor_subject")
+  actorRole      String   @map("actor_role")
+  targetType     String   @map("target_type")
+  targetId       String   @map("target_id")
+  reason         String?
+  before         Json?
+  after          Json?
+  metadata       Json?
+  redactedFields String[] @default([]) @map("redacted_fields")
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(3)
+  prevHash       String   @map("prev_hash")
+  recordHash     String   @map("record_hash")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([category, sequence(sort: Desc)])
+  @@index([actorSubject, sequence(sort: Desc)])
+  @@index([targetType, targetId, sequence(sort: Desc)])
+  @@map("audit_trail")
+}
+
+// #812 — one signed receipt per (action, stage); see services/receipts.ts.
+model ActionReceipt {
+  receiptId String   @id @map("receipt_id")
+  actionId  String   @map("action_id") @db.Uuid
+  stage     String
+  payload   Json
+  algorithm String
+  keyId     String   @map("key_id")
+  signature String
+  issuedAt  DateTime @default(now()) @map("issued_at") @db.Timestamptz(3)
+
+  @@unique([actionId, stage])
+  @@index([actionId])
+  @@map("action_receipts")
+}
+
+// #813 — recovery case for a stuck pending action; see services/pendingRecovery.ts.
+model RecoveryCase {
+  id            String    @id
+  actionId      String    @unique @map("action_id") @db.Uuid
+  walletAddress String    @map("wallet_address")
+  actionType    String    @map("action_type")
+  state         String
+  attempts      Int       @default(0)
+  maxAttempts   Int       @map("max_attempts")
+  staleSince    DateTime  @map("stale_since") @db.Timestamptz(3)
+  detectedAt    DateTime  @map("detected_at") @db.Timestamptz(3)
+  lastAttemptAt DateTime? @map("last_attempt_at") @db.Timestamptz(3)
+  lastError     String?   @map("last_error")
+  resolution    Json?
+  version       Int       @default(1)
+  updatedAt     DateTime  @map("updated_at") @db.Timestamptz(3)
+
+  @@index([state, staleSince])
+  @@index([walletAddress])
+  @@map("recovery_cases")
+}
+
+// #815 — scoped, expiring override of an operation limit; see services/operationLimits.ts.
+model LimitOverride {
+  id         String    @id @db.Uuid
+  operation  String
+  scopeKey   String    @map("scope_key")
+  limitValue Int       @map("limit_value")
+  reason     String
+  grantedBy  String    @map("granted_by")
+  createdAt  DateTime  @map("created_at") @db.Timestamptz(3)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedBy  String?   @map("revoked_by")
+
+  @@index([operation, scopeKey, expiresAt])
+  @@map("limit_overrides")
 }

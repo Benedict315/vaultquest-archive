@@ -1,10 +1,11 @@
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { ERROR_CODES, FINALITY_POLICY } from "../constants.js";
+import { ACTION_STATUSES, ERROR_CODES, FINALITY_POLICY, canTransition } from "../constants.js";
+import type { ActionStatus } from "../constants.js";
 import { AppError } from "../errors.js";
 import { withTelemetry } from "./telemetry.js";
 import type { IntentInput, ActionRecord } from "../types.js";
-import type { CacheService } from "./cacheService.js";
+import type { CacheService, IndexerCheckpoint } from "./cacheService.js";
 import { Amount, InvalidAmountError } from "../amount.js";
 import type { RawHorizonEvent } from "./stellarIndexer.js";
 
@@ -78,6 +79,7 @@ export interface ReconcileEventInput {
   sorobanEventId: string;
   eventPayload: unknown;
   statusHint: "confirmed" | "reverted";
+  ledger?: number;
   /**
    * Close time of the emitting ledger (#751). Used as confirmedAt so replaying
    * the same event always yields the same row; the wall-clock fallback only
@@ -138,6 +140,7 @@ function normalize(value: unknown): string | undefined {
 
 export class LedgerService {
   private onActionConfirmedCallback: ActionConfirmedCallback | null = null;
+  private readonly defaultLeaseTtlMs = 5 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -183,6 +186,10 @@ export class LedgerService {
         walletAddress: input.walletAddress,
         actionType: input.actionType,
         actionPayload: input.actionPayload as object,
+        recoveryCheckpoint: {
+          stage: "intent_recorded",
+          checkpointed_at: new Date().toISOString()
+        },
         observedLedger,
         finalizedLedger,
         confirmationDepth,
@@ -192,25 +199,24 @@ export class LedgerService {
     return created as unknown as ActionRecord;
   }
 
-  async attachTxHash(id: string, txHash: string, observedLedger?: number): Promise<ActionRecord> {
+  async acquireLease({ actionId, workerId, ttlMs }: LeaseInput): Promise<boolean> {
+    const expiresAt = new Date(Date.now() + (ttlMs ?? this.defaultLeaseTtlMs));
     try {
       await this.prisma.actionLease.create({
-        data: { actionId, workerId, expiresAt }
+        data: { actionId: input.actionId, workerId: input.workerId, expiresAt }
       });
       return true;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-        // Lease already exists — bump only if expired or stale.
-        const owned = await this.prisma.actionLease.findUnique({ where: { actionId } });
+        const owned = await this.prisma.actionLease.findUnique({ where: { actionId: input.actionId } });
         if (!owned || owned.expiresAt.getTime() <= Date.now()) {
           const replaced = await this.prisma.actionLease.updateMany({
-            where: { actionId, expiresAt: { lte: new Date() } },
-            data: { workerId, acquiredAt: new Date(), expiresAt }
+            where: { actionId: input.actionId, expiresAt: { lte: new Date() } },
+            data: { workerId: input.workerId, acquiredAt: new Date(), expiresAt }
           });
           return replaced.count > 0;
         }
-        // Active lease held by a different worker.
-        return false;
+        return owned.workerId === input.workerId;
       }
       throw err;
     }
@@ -246,8 +252,8 @@ export class LedgerService {
   }
 
   /**
-   * Convert pending -> submitted atomically, requiring an active lease.
-   * Also persists envelope evidence before any external submission.
+    * Attach a known transaction hash after wallet submission, requiring an active lease.
+    * Reconcile any chain event that arrived before this hash was attached.
    */
   attachTxHash(
     actionId: string,
@@ -264,8 +270,9 @@ export class LedgerService {
     txHash: string,
     lease: { workerId: string; ttlMs?: number }
   ): Promise<ActionRecord> {
+    let confirmedAction: { id: string; actionType: string } | null = null;
     try {
-      return await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const result = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const row = await tx.actionLedger.findUnique({ where: { id: actionId } });
         if (!row) throw AppError.notFound(`action ${actionId} not found`);
 
@@ -273,71 +280,118 @@ export class LedgerService {
           return row as unknown as ActionRecord;
         }
 
-        if (!canTransition(row.status, "submitted")) {
+        const recoveryCheckpoint = row.recoveryCheckpoint as { stage?: string } | null;
+        if (row.status === "pending" && recoveryCheckpoint?.stage === "recovery_required") {
           throw AppError.conflict(
             ERROR_CODES.ILLEGAL_TRANSITION,
-            `cannot attach tx_hash to action in status ${row.status}`
+            "action requires wallet verification before another submission"
           );
         }
 
-        // Acquire/renew lease for this worker on this action.
-        const expiresAt = new Date(Date.now() + (lease.ttlMs ?? this.defaultLeaseTtlMs));
-        const leaseUpsert = await tx.actionLease.upsert({
-          where: { actionId },
-          create: { actionId, workerId: lease.workerId, expiresAt },
-          update: {
-            workerId: lease.workerId,
-            acquiredAt: new Date(),
-            expiresAt
-          }
-        });
-        if (leaseUpsert.workerId !== lease.workerId) {
+        if (!canTransition(row.status, "submitted")) {
+          throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, `cannot attach tx_hash to action in status ${row.status}`);
+        }
+
+        // Do not steal an active lease from another worker.
+        const now = new Date();
+        const currentLease = await tx.actionLease.findUnique({ where: { actionId } });
+        if (currentLease && currentLease.workerId !== lease.workerId && currentLease.expiresAt > now) {
           throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, "action is leased by another worker");
         }
-        const ledger = pending.eventPayload && typeof pending.eventPayload === "object" && "ledger" in pending.eventPayload
+        const expiresAt = new Date(now.getTime() + (lease.ttlMs ?? this.defaultLeaseTtlMs));
+        if (!currentLease) {
+          await tx.actionLease.create({ data: { actionId, workerId: lease.workerId, expiresAt } });
+        } else if (currentLease.workerId === lease.workerId) {
+          await tx.actionLease.update({
+            where: { actionId },
+            data: { acquiredAt: now, expiresAt }
+          });
+        } else {
+          const takeover = await tx.actionLease.updateMany({
+            where: { actionId, workerId: currentLease.workerId, expiresAt: { lte: now } },
+            data: { workerId: lease.workerId, acquiredAt: now, expiresAt }
+          });
+          if (takeover.count === 0) {
+            throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, "action lease changed concurrently");
+          }
+        }
+        const pending = await tx.pendingEvent.findUnique({ where: { txHash } });
+        const eventLedger = pending?.eventPayload && typeof pending.eventPayload === "object" && "ledger" in pending.eventPayload
           ? Number((pending.eventPayload as Record<string, unknown>).ledger)
-          : observedLedger;
-
+          : null;
+        const ledger = eventLedger && Number.isFinite(eventLedger) ? eventLedger : row.observedLedger;
         const confirmationDepth = row.confirmationDepth ?? FINALITY_POLICY.defaultConfirmationDepth;
         const finalizedLedger = ledger && ledger > 0 ? ledger + confirmationDepth : null;
         const finalityStatus = ledger && ledger > 0 ? "provisional" : "finalized";
+        const submittedAt = new Date();
 
-        const confirmed = await tx.actionLedger.update({
-          where: { id },
+        const transition = await tx.actionLedger.updateMany({
+          where: {
+            id: actionId,
+            status: "pending",
+            NOT: { recoveryCheckpoint: { path: ["stage"], equals: "recovery_required" } }
+          },
           data: {
             status: "submitted",
+            recoveryCheckpoint: {
+              stage: "transaction_submitted",
+              checkpointed_at: submittedAt.toISOString()
+            },
             txHash,
-            submittedAt: new Date(),
-            confirmedAt: new Date(),
-            sorobanEventId: pending.sorobanEventId,
-            errorCode: pending.statusHint === "reverted" ? ERROR_CODES.REVERTED_ON_CHAIN : null,
-            observedLedger: ledger ?? row.observedLedger,
+            submittedAt,
+            observedLedger: ledger,
             finalizedLedger,
             finalityStatus
           }
         });
-        return confirmed as unknown as ActionRecord;
-      }
-
-      const confirmationDepth = row.confirmationDepth ?? FINALITY_POLICY.defaultConfirmationDepth;
-      const finalizedLedger = observedLedger && observedLedger > 0 ? observedLedger + confirmationDepth : null;
-      const finalityStatus = observedLedger && observedLedger > 0 ? "provisional" : "finalized";
-
-      const updated = await tx.actionLedger.update({
-        where: { id },
-        data: {
-          status: "submitted",
-          txHash,
-          submittedAt: new Date(),
-          observedLedger: observedLedger ?? row.observedLedger,
-          finalizedLedger,
-          finalityStatus
+        if (transition.count === 0) {
+          throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, "action changed before transaction attachment");
         }
+        let updated = await tx.actionLedger.findUnique({ where: { id: actionId } });
+        if (!updated) throw AppError.notFound(`action ${actionId} not found`);
+
+        if (pending) {
+          const isReverted = pending.statusHint === "reverted";
+          const checkpointedAt = (pending.ledgerClosedAt ?? submittedAt).toISOString();
+          updated = await tx.actionLedger.update({
+            where: { id: actionId },
+            data: {
+              status: isReverted ? "reverted" : "confirmed",
+              recoveryCheckpoint: {
+                stage: isReverted ? "reverted" : "confirmed",
+                checkpointed_at: checkpointedAt
+              },
+              verifiedPayload: pending.eventPayload,
+              sorobanEventId: pending.sorobanEventId,
+              confirmedAt: pending.ledgerClosedAt ?? submittedAt,
+              errorCode: isReverted ? ERROR_CODES.REVERTED_ON_CHAIN : null
+            }
+          });
+          await tx.pendingEvent.update({
+            where: { txHash },
+            data: { consumedAt: submittedAt }
+          });
+          if (!isReverted && row.actionType === "select_winner") {
+            confirmedAction = { id: actionId, actionType: row.actionType };
+          }
+        }
+
+        return updated as unknown as ActionRecord;
       });
-      return updated as unknown as ActionRecord;
-      });
+      if (confirmedAction) {
+        try {
+          this.onActionConfirmedCallback?.(confirmedAction.id, confirmedAction.actionType);
+        } catch {
+          // Callback errors must not undo a committed chain confirmation.
+        }
+      }
+      return result;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const target = String(err.meta?.target ?? "");
+        if (!target.includes("tx_hash")) {
+          throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, "action lease was acquired concurrently");
+        }
         throw AppError.conflict(
           ERROR_CODES.TX_HASH_ALREADY_ATTACHED,
           "tx_hash already attached to another action"
@@ -369,7 +423,15 @@ export class LedgerService {
 
     const updated = await this.prisma.actionLedger.update({
       where: { id },
-      data: { status: "failed", errorCode, errorDetail: errorDetail ?? null }
+      data: {
+        status: "failed",
+        errorCode,
+        errorDetail: errorDetail ?? null,
+        recoveryCheckpoint: {
+          stage: "failed",
+          checkpointed_at: new Date().toISOString()
+        }
+      }
     });
     return updated as unknown as ActionRecord;
   }
@@ -377,6 +439,41 @@ export class LedgerService {
   async getAction(id: string): Promise<ActionRecord | null> {
     const row = await this.prisma.actionLedger.findUnique({ where: { id } });
     return row ? (row as unknown as ActionRecord) : null;
+  }
+
+  async markExternalActionStarted(id: string): Promise<ActionRecord> {
+    const row = await this.prisma.actionLedger.findUnique({ where: { id } });
+    if (!row) throw AppError.notFound(`action ${id} not found`);
+
+    const checkpoint = row.recoveryCheckpoint as { stage?: string } | null;
+    if (row.status === "pending" && checkpoint?.stage === "external_action_started") {
+      return row as unknown as ActionRecord;
+    }
+    if (row.status === "pending" && checkpoint?.stage === "recovery_required") {
+      return row as unknown as ActionRecord;
+    }
+    if (row.status !== "pending") {
+      if (["external_action_started", "transaction_submitted", "recovery_required"].includes(checkpoint?.stage ?? "")) {
+        return row as unknown as ActionRecord;
+      }
+      throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, `cannot start external action in status ${row.status}`);
+    }
+
+    const updated = await this.prisma.actionLedger.updateMany({
+      where: { id, status: "pending" },
+      data: {
+        recoveryCheckpoint: {
+          stage: "external_action_started",
+          checkpointed_at: new Date().toISOString()
+        }
+      }
+    });
+    const current = await this.prisma.actionLedger.findUnique({ where: { id } });
+    if (!current) throw AppError.notFound(`action ${id} not found`);
+    if (updated.count === 0 && current.status === "pending") {
+      throw AppError.conflict(ERROR_CODES.ILLEGAL_TRANSITION, "action checkpoint changed concurrently");
+    }
+    return current as unknown as ActionRecord;
   }
 
   /**
@@ -458,7 +555,7 @@ export class LedgerService {
     };
 
     const rows = await this.prisma.actionLedger.findMany({
-      where,
+      where: where as Prisma.ActionLedgerWhereInput,
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: limit + 1,
       ...(cursor != null && { cursor: { id: cursor }, skip: 1 })
@@ -471,81 +568,23 @@ export class LedgerService {
     return { items: items as unknown as ActionRecord[], nextCursor };
   }
 
-  async reconcileEvent(input: ReconcileEventInput): Promise<{ matched: boolean }> {
-    let shouldFireCallback = false;
-    let actionIdToCallback: string | null = null;
-    let actionTypeToCallback: string | null = null;
-
-    const outcome = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-  async getHistoryPaginated(params: {
-    walletAddress: string;
-    status?: ActionStatus;
-    type?: string;
-    skip: number;
-    limit: number;
-  }): Promise<{ items: ActionRecord[]; total: number }> {
-    const { walletAddress, status, type, skip, limit } = params;
-    
-    const whereClause: any = { walletAddress };
-    if (status) whereClause.status = status;
-    if (type) whereClause.actionType = type;
-
-    const [total, rows] = await this.prisma.$transaction([
-      this.prisma.actionLedger.count({ where: whereClause }),
-      this.prisma.actionLedger.findMany({
-        where: whereClause,
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        skip,
-        take: limit,
-      }),
-    ]);
-
-    return { items: rows as unknown as ActionRecord[], total };
-  }
-
-
   reconcileEvent(input: ReconcileEventInput): Promise<{ matched: boolean }> {
-    return withTelemetry({ operation: "action.reconcile_event", actorType: "system" }, () =>
-      this.reconcileEventImpl(input)
-    );
+    return withTelemetry({ operation: "action.reconcile_event", actorType: "system" }, () => this.reconcileEventImpl(input));
   }
 
   private async reconcileEventImpl(input: ReconcileEventInput): Promise<{ matched: boolean }> {
-    return this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    let shouldFireCallback = false;
+    let actionIdToCallback: string | null = null;
+    let actionTypeToCallback: string | null = null;
+    const outcome = await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const row = await tx.actionLedger.findFirst({ where: { txHash: input.txHash } });
-
       if (!row) {
-        const eventPayloadWithLedger = input.ledger
-          ? { ...(input.eventPayload as object), ledger: input.ledger }
-          : input.eventPayload;
-        await tx.pendingEvent.upsert({
-          where: { txHash: input.txHash },
-          create: {
-            txHash: input.txHash,
-            sorobanEventId: input.sorobanEventId,
-            eventPayload: eventPayloadWithLedger as object,
-            statusHint: input.statusHint
-          },
-          update: {}
-        });
-        if (this.cacheService) {
-          await this.cacheService.setPendingEvent({
-            txHash: input.txHash,
-            sorobanEventId: input.sorobanEventId,
-            eventPayload: eventPayloadWithLedger,
-            statusHint: input.statusHint,
-            ledgerClosedAt: input.ledgerClosedAt ?? null,
-            receivedAt: new Date(),
-            consumedAt: null
-          });
-        }
+        const eventPayloadWithLedger = input.ledger ? { ...(input.eventPayload as object), ledger: input.ledger } : input.eventPayload;
+        await tx.pendingEvent.upsert({ where: { txHash: input.txHash }, create: { txHash: input.txHash, sorobanEventId: input.sorobanEventId, eventPayload: eventPayloadWithLedger as object, statusHint: input.statusHint, ledgerClosedAt: input.ledgerClosedAt ?? null }, update: {} });
+        if (this.cacheService) await this.cacheService.setPendingEvent({ txHash: input.txHash, sorobanEventId: input.sorobanEventId, eventPayload: eventPayloadWithLedger, statusHint: input.statusHint, ledgerClosedAt: input.ledgerClosedAt ?? null, receivedAt: new Date(), consumedAt: null });
         return { matched: false };
       }
-
-      if (row.status === "confirmed" || row.status === "reverted") {
-        return { matched: true };
-      }
-
+      if (row.status === "confirmed" || row.status === "reverted") return { matched: true };
       const ledger = input.ledger ?? row.observedLedger;
       const confirmationDepth = row.confirmationDepth ?? FINALITY_POLICY.defaultConfirmationDepth;
       const finalizedLedger = ledger && ledger > 0 ? ledger + confirmationDepth : null;
@@ -555,6 +594,10 @@ export class LedgerService {
         where: { id: row.id },
         data: {
           status: input.statusHint === "reverted" ? "reverted" : "confirmed",
+          recoveryCheckpoint: {
+            stage: input.statusHint === "reverted" ? "reverted" : "confirmed",
+            checkpointed_at: (input.ledgerClosedAt ?? new Date()).toISOString()
+          },
           sorobanEventId: input.sorobanEventId,
           confirmedAt: new Date(),
           errorCode: input.statusHint === "reverted" ? ERROR_CODES.REVERTED_ON_CHAIN : null,
@@ -574,15 +617,7 @@ export class LedgerService {
       await tx.actionLease.deleteMany({ where: { actionId: row.id } });
       return { matched: true };
     });
-
-    if (shouldFireCallback && actionIdToCallback && actionTypeToCallback) {
-      try {
-        this.onActionConfirmedCallback?.(actionIdToCallback, actionTypeToCallback);
-      } catch {
-        // callback errors should not break reconciliation
-      }
-    }
-
+    if (shouldFireCallback && actionIdToCallback && actionTypeToCallback) { try { this.onActionConfirmedCallback?.(actionIdToCallback, actionTypeToCallback); } catch { /* callback errors must not break reconciliation */ } }
     return outcome;
   }
 
@@ -1121,11 +1156,7 @@ export class LedgerService {
     };
   }
 
-  /**
-   * Recover stuck submitted actions whose leases have expired and either
-   * (a) transition them to `orphaned` with a canonical error or (b) make them
-   * available for a new submission attempt.
-   */
+  /** Marks stale external operations for investigation without resubmitting them. */
   async recoverSubmittedLeases(
     workerId?: string,
     options: { ttlMs?: number; batchSize?: number; dryRun?: boolean } = {}
@@ -1136,22 +1167,40 @@ export class LedgerService {
 
     const cutoff = new Date(Date.now() - ttlMs);
 
-    // Submitted actions with no lease OR an expired lease.
+    // Only consider submitted actions old enough to have outlived their worker.
     const candidates = await this.prisma.actionLedger.findMany({
       where: {
-        status: "submitted"
+        status: "submitted",
+        OR: [
+          { submittedAt: { lte: cutoff } },
+          { submittedAt: null, updatedAt: { lte: cutoff } }
+        ]
       },
       orderBy: { submittedAt: "asc" },
       take: batchSize
     });
 
-    if (candidates.length === 0) {
+    const stalePending = await this.prisma.actionLedger.findMany({
+      where: {
+        status: "pending",
+        updatedAt: { lte: cutoff },
+        recoveryCheckpoint: { path: ["stage"], equals: "external_action_started" }
+      },
+      orderBy: { updatedAt: "asc" },
+      take: batchSize,
+      select: { id: true }
+    });
+    const uncertainPendingIds = stalePending.map((row) => row.id);
+
+    if (candidates.length === 0 && uncertainPendingIds.length === 0) {
       return { recovered: 0, expired: 0 };
     }
 
-    const leases = await this.prisma.actionLease.findMany({
-      where: { actionId: { in: candidates.map((c) => c.id) } }
-    });
+    const leases = candidates.length > 0
+      ? await this.prisma.actionLease.findMany({
+          where: { actionId: { in: candidates.map((c) => c.id) } }
+        })
+      : [];
     const expiredIds = new Set(
       leases
         .filter((l) => l.expiresAt.getTime() <= Date.now())
@@ -1162,36 +1211,55 @@ export class LedgerService {
     );
     const targetIds = [...new Set([...expiredIds, ...noLeaseIds])];
 
-    if (targetIds.length === 0) {
+    if (targetIds.length === 0 && uncertainPendingIds.length === 0) {
       return { recovered: 0, expired: 0 };
     }
 
     if (dryRun) {
-      return { recovered: 0, expired: targetIds.length };
+      return { recovered: 0, expired: targetIds.length + uncertainPendingIds.length };
     }
 
-    await this.prisma.actionLedger.updateMany({
-      where: { id: { in: targetIds }, status: "submitted" },
-      data: { status: "orphaned", errorCode: ERROR_CODES.ORPHAN_TTL_EXPIRED }
-    });
+    const checkpointedAt = new Date().toISOString();
+    const [updated, pendingUpdated] = await Promise.all([
+      targetIds.length > 0
+        ? this.prisma.actionLedger.updateMany({
+            where: { id: { in: targetIds }, status: "submitted" },
+            data: {
+              status: "orphaned",
+              errorCode: ERROR_CODES.ORPHAN_TTL_EXPIRED,
+              errorDetail: "Transaction outcome is unknown. Verify the transaction on-chain before retrying.",
+              recoveryCheckpoint: {
+                stage: "recovery_required",
+                checkpointed_at: checkpointedAt,
+                recovery_worker: workerId ?? null
+              }
+            }
+          })
+        : Promise.resolve({ count: 0 }),
+      uncertainPendingIds.length > 0
+        ? this.prisma.actionLedger.updateMany({
+            where: { id: { in: uncertainPendingIds }, status: "pending", updatedAt: { lte: cutoff } },
+            data: {
+              recoveryCheckpoint: {
+                stage: "recovery_required",
+                checkpointed_at: checkpointedAt,
+                previous_stage: "external_action_started",
+                recovery_worker: workerId ?? null
+              }
+            }
+          })
+        : Promise.resolve({ count: 0 })
+    ]);
 
-    // Release expired leases so recovery can re-submit.
-    await this.prisma.actionLease.deleteMany({ where: { actionId: { in: targetIds } } });
-
-    // Opportunistically drop any stale pending_events tied to these tx hashes.
-    const hashes = candidates
-      .filter((c) => targetIds.includes(c.id) && c.txHash)
-      .map((c) => c.txHash as string);
-    if (hashes.length > 0) {
-      await this.prisma.pendingEvent.deleteMany({ where: { txHash: { in: hashes } } });
-      if (this.cacheService) {
-        for (const h of hashes) {
-          await this.cacheService.deletePendingEvent(h);
-        }
-      }
+    if (targetIds.length > 0) {
+      // Release expired leases; the original transaction remains the source of truth.
+      await this.prisma.actionLease.deleteMany({ where: { actionId: { in: targetIds } } });
     }
 
-    return { recovered: targetIds.length, expired: targetIds.length };
+    return {
+      recovered: updated.count + pendingUpdated.count,
+      expired: targetIds.length + uncertainPendingIds.length
+    };
   }
 
   /**

@@ -158,6 +158,133 @@ Run it with `pnpm test -- smoke.spec.ts`. If this passes locally, the
 backend stack is healthy enough for issues #13 and #14 to land work
 against it.
 
+## Release readiness checklist (high-risk changes)
+
+High-risk changes to VaultQuest must pass a consistent release
+checklist before merge. "High-risk" means any change that touches
+vault accounting, prize draws, wallet flows, the intent ledger, the
+indexer ingestion path, migrations, or production configuration.
+When in doubt, treat the change as high-risk.
+
+The canonical checklist lives in
+`backend/docs/RELEASE_CHECKLIST.md` and is mirrored below so it is
+discoverable from the architecture doc. A copy-pasteable template is
+in `backend/docs/templates/RELEASE_CHECKLIST_TEMPLATE.md`; every
+high-risk PR description must include the rendered template with all
+boxes checked or explicitly waived.
+
+### Required criteria
+
+Every high-risk change must satisfy all five categories below. A PR
+that cannot check a box must link to a maintainer-approved exception
+(see *Exception handling* below) in the PR description.
+
+1. **Tests**
+   - `pnpm test` passes locally and in CI (vitest + testcontainers).
+   - New behavior has unit coverage in `tests/` and, where the change
+     crosses the API boundary, an integration test that boots the
+     Fastify app against an ephemeral Postgres 16 container.
+   - Vault accounting and prize-draw changes include a replay-safety
+     test that exercises `LedgerService.reconcileEvent` with duplicate
+     deliveries and asserts idempotent status transitions.
+   - Wallet-flow changes include a test for the `Idempotency-Key`
+     replay path (refresh / timeout recovery) and for the
+     `correlation_id` propagation through structured error responses.
+   - `pnpm test -- smoke.spec.ts` passes; the boot smoke test is the
+     minimum bar for any backend change.
+
+2. **Documentation**
+   - `backend/docs/ARCHITECTURE.md` is updated when service
+     boundaries, the domain model, the status machine, or the
+     migration story change.
+   - Contributor-facing setup, env vars, or API contracts are updated
+     in the same PR (no follow-up doc PRs for behavior changes).
+   - User-dashboard or protocol-reporting changes note the
+     `is_stale` semantics returned by `GET /dashboard/summary` and any
+     impact on the frontend (#7, #14).
+
+3. **Migration**
+   - Migrations are additive (new tables, new columns, new enum
+     values). Destructive changes ship a paired migration that keeps
+     the previous schema readable until traffic has cut over.
+   - `pnpm exec prisma migrate deploy` has been run against a fresh
+     database and against a copy of the current production schema.
+   - The migration is reversible by rolling back the deploy and
+     re-running the previous release; if it is not, the PR documents
+     the forward-only plan and the maintainer sign-off.
+
+4. **Config**
+   - Any new env var is added to `src/env.ts` with a Zod schema, to
+     `.env.example`, and to the configuration table in this document.
+   - Boot fails loudly with a structured Zod error when a required
+     value is missing or malformed; the PR includes the failure
+     output.
+   - Secret rotation or `INTERNAL_SECRET` changes are called out in
+     the PR description with the deployment steps.
+
+5. **Rollback**
+   - The PR describes how to roll back: revert the deploy, re-run the
+     previous release, and (if applicable) run the paired migration.
+   - Rollback has been exercised in a staging or ephemeral
+     environment, or the PR explains why it cannot be and what the
+     manual procedure is.
+   - Data written by the new code is readable by the previous
+     release, or the PR documents the forward-only constraint.
+
+### Automated validation
+
+Where practical, the checklist is enforced by tooling rather than by
+reviewer memory:
+
+- `pnpm release:check` runs the local validation command. It executes
+  `pnpm test`, `pnpm exec prisma migrate deploy` against a throwaway
+  database, and a schema-drift check that fails if
+  `prisma/schema.prisma` and `prisma/migrations/` disagree.
+- CI runs `pnpm release:check` on every PR that touches
+  `backend/src/**`, `backend/prisma/**`, or `backend/docs/**`.
+- The PR template (`.github/pull_request_template.md`) requires the
+  rendered checklist and blocks merge until every box is checked or
+  an exception link is present.
+
+If `pnpm release:check` cannot run in a contributor's environment
+(for example, Docker is unavailable), the PR must paste the CI run
+URL that executed it.
+
+### Exception handling for urgent fixes
+
+Urgent fixes (production incidents, security patches, or
+time-critical protocol reporting corrections) may bypass individual
+checklist items with explicit maintainer sign-off:
+
+1. Open the PR with the rendered checklist and mark each waived item
+   with `WAIVED:` followed by the reason and the incident link.
+2. Request review from at least one maintainer listed in
+   `CODEOWNERS`. A single maintainer approval is sufficient for a
+   waiver; two are required if the waiver covers **Migration** or
+   **Rollback**.
+3. The maintainer records the sign-off in the PR description with
+   their GitHub handle and the timestamp.
+4. A follow-up issue is filed within 24 hours to complete the waived
+   items. The follow-up is linked from the original PR and is
+   prioritized in the next release.
+
+Waivers are never silent. A high-risk change merged without a
+completed checklist and without a recorded waiver is treated as a
+release blocker and must be reverted.
+
+### Maintainer sign-off expectations
+
+- Maintainers are the only reviewers who can approve a waiver or
+  sign off on a forward-only migration.
+- Sign-off means the maintainer has read the checklist, verified the
+  test output and CI run, and accepts responsibility for the
+  rollback plan.
+- Maintainers must not approve their own high-risk PRs; a second
+  maintainer is required for any change touching vault accounting,
+  prize draws, or the intent ledger.
+- Sign-off is recorded in the PR description, not only in the review
+  UI, so the audit trail survives branch deletion.
+
 ## Relationship to the rest of the system
 
 - **Frontend (#7, #14)** consumes only the public Fastify routes.

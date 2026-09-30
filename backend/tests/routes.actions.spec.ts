@@ -40,6 +40,7 @@ describe("public /actions routes", () => {
     const body = res.json().data;
     expect(body.status).toBe("pending");
     expect(body.correlation_id).toBeDefined();
+    expect(body.recovery.next_action).toBe("continue_wallet_approval");
   });
 
   it("POST /actions returns 200 on idempotent replay", async () => {
@@ -93,6 +94,24 @@ describe("public /actions routes", () => {
     expect(patch.statusCode).toBe(200);
     expect(patch.json().data.status).toBe("submitted");
     expect(patch.json().data.tx_hash).toBe("tx_1");
+  });
+
+  it("POST /actions/:id/checkpoint persists the external-action boundary", async () => {
+    const create = await app.inject({
+      method: "POST", url: "/actions",
+      headers: { "idempotency-key": randomUUID(), "content-type": "application/json" },
+      payload: { wallet_address: "GABC", action_type: "deposit", action_payload: { vault_id: "1" } }
+    });
+    const id = create.json().data.id;
+    const checkpoint = await app.inject({
+      method: "POST", url: `/actions/${id}/checkpoint`,
+      headers: { "content-type": "application/json" },
+      payload: { stage: "external_action_started" }
+    });
+
+    expect(checkpoint.statusCode).toBe(200);
+    expect(checkpoint.json().data.recovery.checkpoint.stage).toBe("external_action_started");
+    expect(checkpoint.json().data.recovery.next_action).toBe("verify_wallet_or_chain_before_retry");
   });
 
   it("POST /actions/:id/cancel transitions to failed", async () => {

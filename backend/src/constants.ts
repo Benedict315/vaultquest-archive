@@ -15,7 +15,7 @@ const TRANSITIONS: Record<ActionStatus, readonly ActionStatus[]> = {
   confirmed: [],
   failed: [],
   reverted: [],
-  orphaned: ["submitted"]
+  orphaned: []
 };
 
 export function canTransition(from: ActionStatus, to: string): boolean {

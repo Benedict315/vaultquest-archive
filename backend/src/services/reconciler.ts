@@ -4,8 +4,8 @@
  * `sweepOrphans` runs on a cron schedule (see `src/cron.ts`) and:
  *   1. Marks `submitted` actions whose `updatedAt` is older than `ttlMinutes`
  *      as `orphaned` (they have been broadcasting too long with no confirmation).
- *   2. Prunes unconsumed `pending_events` older than 1 hour (events that
- *      arrived from the indexer but whose matching intent was never attached).
+ *   2. Prunes unconsumed `pending_events` older than 1 hour unless their
+ *      transaction hash belongs to an unresolved action.
  *
  * `recoverStuckActions` uses the LedgerService lease-based recovery to handle
  * actions whose worker leases have expired.
@@ -34,6 +34,8 @@ const logger = createLogger(process.env.LOG_LEVEL ?? "info");
 export interface SweepResult {
   /** Number of submitted actions promoted to orphaned. */
   orphaned: number;
+  /** Number of stale wallet operations promoted to recovery_required. */
+  recoveryRequired: number;
   /** Number of stale pending_events rows deleted. */
   prunedEvents: number;
 }
@@ -727,30 +729,58 @@ export async function sweepOrphans(
     },
     select: { id: true }
   });
+  const activeLeases = staleActions.length > 0
+    ? await prisma.actionLease.findMany({
+        where: {
+          actionId: { in: staleActions.map((action) => action.id) },
+          expiresAt: { gt: new Date() }
+        },
+        select: { actionId: true }
+      })
+    : [];
+  const activelyLeasedIds = new Set(activeLeases.map((lease) => lease.actionId));
+  const expiredActions = staleActions.filter((action) => !activelyLeasedIds.has(action.id));
 
   let orphaned = 0;
-  if (staleActions.length > 0) {
+  if (expiredActions.length > 0) {
     const result = await prisma.actionLedger.updateMany({
       where: {
-        id: { in: staleActions.map((a) => a.id) },
+        id: { in: expiredActions.map((action) => action.id) },
         status: "submitted"
       },
       data: {
         status: "orphaned",
-        errorCode: ERROR_CODES.ORPHAN_TTL_EXPIRED
+        errorCode: ERROR_CODES.ORPHAN_TTL_EXPIRED,
+        errorDetail: "Transaction outcome is unknown. Verify the transaction on-chain before retrying.",
+        recoveryCheckpoint: {
+          stage: "recovery_required",
+          checkpointed_at: new Date().toISOString(),
+          recovery_worker: "orphan-sweeper"
+        }
       }
     });
     orphaned = result.count;
   }
 
-  const pruned = await prisma.pendingEvent.deleteMany({
+  const interruptedPending = await prisma.actionLedger.updateMany({
     where: {
-      consumedAt: null,
-      receivedAt: { lt: eventCutoff }
+      status: "pending",
+      updatedAt: { lt: cutoff },
+      recoveryCheckpoint: { path: ["stage"], equals: "external_action_started" }
+    },
+    data: {
+      recoveryCheckpoint: {
+        stage: "recovery_required",
+        checkpointed_at: new Date().toISOString(),
+        previous_stage: "external_action_started",
+        recovery_worker: "orphan-sweeper"
+      }
     }
   });
 
-  return { orphaned, prunedEvents: pruned.count };
+  const pruned = await pruneStalePendingEvents(prisma, eventCutoff);
+
+  return { orphaned, recoveryRequired: interruptedPending.count, prunedEvents: pruned.count };
 }
 
 export async function recoverStuckActions(
@@ -764,14 +794,30 @@ export async function recoverStuckActions(
   const result = await svc.recoverSubmittedLeases("recovery-worker", { ttlMs, dryRun });
 
   const eventCutoff = new Date(Date.now() - 60 * 60 * 1000);
-  const pruned = await prisma.pendingEvent.deleteMany({
-    where: {
-      consumedAt: null,
-      receivedAt: { lt: eventCutoff }
-    }
-  });
+  const pruned = await pruneStalePendingEvents(prisma, eventCutoff);
 
   return { recovered: result.recovered, prunedEvents: pruned.count };
+}
+
+async function pruneStalePendingEvents(prisma: PrismaClient, cutoff: Date) {
+  const unresolvedActions = await prisma.actionLedger.findMany({
+    where: {
+      status: { in: ["submitted", "orphaned"] },
+      txHash: { not: null }
+    },
+    select: { txHash: true }
+  });
+  const unresolvedHashes = unresolvedActions
+    .map((action) => action.txHash)
+    .filter((txHash): txHash is string => txHash !== null);
+
+  return prisma.pendingEvent.deleteMany({
+    where: {
+      consumedAt: null,
+      receivedAt: { lt: cutoff },
+      ...(unresolvedHashes.length > 0 && { txHash: { notIn: unresolvedHashes } })
+    }
+  });
 }
 
 // ─── Dual-controlled repair proposals (#597) ─────────────────────────────────
