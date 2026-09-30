@@ -21,9 +21,9 @@
  * The database is reached through {@link MigrationDatabase} so the whole
  * framework is testable without Postgres.
  *
- * 4. **Release readiness** — {@link evaluateReleaseReadiness} turns a plan and
- *    its preview into a pass/fail checklist covering tests, migration, config,
- *    rollback, and docs, so high-risk changes can be gated in CI.
+ *  4. **Duplicate detection** — {@link detectDuplicates} checks user-submitted
+ *     records against canonical fields, flagging exact duplicates as blocking
+ *     and near duplicates as ambiguous for maintainer review.
  */
 
 import * as fs from "fs";
@@ -38,7 +38,8 @@ export type MigrationActionKind =
   | "drop-column"
   | "alter-column"
   | "data-update"
-  | "other";
+  | "other"
+  | "duplicate-check";
 
 export interface PlannedAction {
   kind: MigrationActionKind;
@@ -73,6 +74,45 @@ export interface AffectedRecords {
   columns: string[];
 }
 
+export type DuplicateSeverity = "exact" | "near" | "none";
+
+export interface DuplicateKey {
+  /** Canonical field names that together form the duplicate key. */
+  fields: string[];
+  /** Normalization applied before comparison. */
+  normalize: (value: string) => string;
+}
+
+export interface DuplicateCandidate {
+  /** Stable identifier for the record being checked. */
+  id: string;
+  /** Raw field values keyed by canonical field name. */
+  values: Record<string, string | null | undefined>;
+}
+
+export interface DuplicateMatch {
+  /** The candidate record that was checked. */
+  candidate: DuplicateCandidate;
+  /** The existing record it matched, if any. */
+  existing: DuplicateCandidate | null;
+  severity: DuplicateSeverity;
+  /** Human-readable explanation of the match. */
+  reason: string;
+  /** Fields that contributed to the match. */
+  matchedFields: string[];
+}
+
+export interface DuplicateReport {
+  /** Exact duplicates block submission. */
+  blocking: DuplicateMatch[];
+  /** Near duplicates require maintainer review. */
+  review: DuplicateMatch[];
+  /** Candidates with no match. */
+  clean: DuplicateMatch[];
+  /** True when nothing blocks submission. */
+  ok: boolean;
+}
+
 export interface MigrationPreview {
   plan: MigrationPlan;
   alreadyPresent: string[];
@@ -100,40 +140,12 @@ export interface PostCheckReport {
   failures: PostCheck[];
 }
 
-export type ReadinessCategory =
-  | "tests"
-  | "migration"
-  | "config"
-  | "rollback"
-  | "docs";
-
-export interface ReadinessItem {
-  category: ReadinessCategory;
-  name: string;
-  ok: boolean;
-  /** True when the item cannot be auto-verified and needs maintainer sign-off. */
-  manual: boolean;
-  detail: string;
-}
-
-export interface ReadinessInput {
-  plan: MigrationPlan;
-  preview?: MigrationPreview;
-  postChecks?: PostCheckReport;
-  /** Paths changed in the PR, used to detect docs/config/test updates. */
-  changedPaths?: string[];
-  /** Whether the change is being fast-tracked as an urgent fix. */
-  urgent?: boolean;
-  /** Reason recorded when an urgent fix bypasses manual items. */
-  exceptionReason?: string;
-}
-
-export interface ReadinessReport {
-  ok: boolean;
-  items: ReadinessItem[];
-  blockers: ReadinessItem[];
-  manualSignOff: ReadinessItem[];
-  exceptionApplied: boolean;
+export interface DuplicateReviewResolution {
+  candidateId: string;
+  existingId: string | null;
+  decision: "allow" | "reject";
+  reviewer: string;
+  note?: string;
 }
 
 const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
@@ -141,6 +153,16 @@ const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
 const identifier = (after: string): string => {
   const match = after.match(/"([^"]+)"|([A-Za-z_][\w$]*)/);
   return match ? (match[1] ?? match[2]) : "";
+};
+
+/**
+ * Default canonical key for VaultQuest user-submitted records: the vault
+ * address plus the prize draw identifier, normalized to lowercase and with
+ * surrounding whitespace removed. Callers may override for other record types.
+ */
+export const DEFAULT_DUPLICATE_KEY: DuplicateKey = {
+  fields: ["vaultAddress", "drawId"],
+  normalize: (value: string) => value.trim().toLowerCase(),
 };
 
 /**
@@ -528,120 +550,186 @@ export async function runPostChecks(db: MigrationDatabase, plan: MigrationPlan):
   return { ok: failures.length === 0, checks, failures };
 }
 
-const hasPath = (paths: string[], pattern: RegExp): boolean =>
-  paths.some((p) => pattern.test(p));
-
 /**
- * Builds the release readiness checklist for a high-risk change. Items that can
- * be derived from the plan, preview, post-checks, or changed file paths are
- * verified automatically; the rest are surfaced as manual sign-off items so a
- * maintainer can confirm them before release.
- *
- * Urgent fixes may set `urgent: true` with an `exceptionReason`; that downgrades
- * manual items to non-blocking but still records them for post-hoc review.
+ * Builds a canonical, deterministic key string for a candidate using the
+ * supplied {@link DuplicateKey}. Returns null when any canonical field is
+ * missing, so incomplete records never collide with complete ones.
  */
-export function evaluateReleaseReadiness(input: ReadinessInput): ReadinessReport {
-  const { plan, preview, postChecks, changedPaths = [], urgent = false, exceptionReason } = input;
-  const items: ReadinessItem[] = [];
-
-  const risky = plan.destructive.length > 0 || plan.dataChanges.length > 0;
-
-  // Tests
-  const testsUpdated = hasPath(changedPaths, /(^|\/)(__tests__|tests?|spec)\//i) ||
-    hasPath(changedPaths, /\.(test|spec)\.[tj]sx?$/i);
-  items.push({
-    category: "tests",
-    name: "Automated tests cover the change",
-    ok: testsUpdated || !risky,
-    manual: !testsUpdated && risky,
-    detail: testsUpdated
-      ? "test files included in the change"
-      : risky
-        ? "no test changes detected for a risky migration"
-        : "no risky statements; tests optional",
-  });
-
-  // Migration
-  const postOk = postChecks ? postChecks.ok : false;
-  items.push({
-    category: "migration",
-    name: "Migration plan parsed and post-checks pass",
-    ok: !plan.isEmpty && (postChecks ? postOk : true),
-    manual: !postChecks,
-    detail: plan.isEmpty
-      ? "migration contains no recognised statements"
-      : postChecks
-        ? postOk
-          ? "all post-checks passed"
-          : `${postChecks.failures.length} post-check(s) failed`
-        : "post-checks not run yet",
-  });
-
-  // Config
-  const configUpdated = hasPath(changedPaths, /(^|\/)(\.env|config|settings)/i) ||
-    hasPath(changedPaths, /\.(env|ya?ml|json|toml)$/i);
-  const needsConfig = plan.actions.some((a) => a.kind === "add-column" || a.kind === "alter-column");
-  items.push({
-    category: "config",
-    name: "Configuration and env changes documented",
-    ok: !needsConfig || configUpdated,
-    manual: needsConfig && !configUpdated,
-    detail: needsConfig
-      ? configUpdated
-        ? "config files updated alongside schema change"
-        : "schema change may require config/env updates"
-      : "no config-affecting statements",
-  });
-
-  // Rollback
-  const rollbackReady = preview ? preview.rollbackNotes.length > 0 : plan.destructive.length === 0;
-  items.push({
-    category: "rollback",
-    name: "Rollback or forward-fix plan documented",
-    ok: rollbackReady,
-    manual: plan.destructive.length > 0 && !preview,
-    detail: rollbackReady
-      ? "rollback notes available"
-      : "destructive statements without rollback notes",
-  });
-
-  // Docs
-  const docsUpdated = hasPath(changedPaths, /(^|\/)(docs?|README|CHANGELOG)/i) ||
-    hasPath(changedPaths, /\.mdx?$/i);
-  items.push({
-    category: "docs",
-    name: "Contributor and operator docs updated",
-    ok: docsUpdated || !risky,
-    manual: risky && !docsUpdated,
-    detail: docsUpdated
-      ? "documentation updated"
-      : risky
-        ? "high-risk change without doc updates"
-        : "no doc updates required",
-  });
-
-  const exceptionApplied = urgent && Boolean(exceptionReason);
-  const blockers = items.filter((i) => !i.ok && !i.manual);
-  const manualSignOff = items.filter((i) => i.manual);
-  const ok = exceptionApplied ? blockers.length === 0 : blockers.length === 0 && manualSignOff.length === 0;
-
-  return { ok, items, blockers, manualSignOff, exceptionApplied };
+export function canonicalKey(
+  candidate: DuplicateCandidate,
+  key: DuplicateKey = DEFAULT_DUPLICATE_KEY,
+): string | null {
+  const parts: string[] = [];
+  for (const field of key.fields) {
+    const raw = candidate.values[field];
+    if (raw === null || raw === undefined) return null;
+    const normalized = key.normalize(String(raw));
+    if (normalized === "") return null;
+    parts.push(normalized);
+  }
+  return parts.join("\u0000");
 }
 
-export function formatReadiness(report: ReadinessReport): string {
-  const lines: string[] = [];
-  lines.push("Release readiness checklist");
-  lines.push("===========================");
-  for (const item of report.items) {
-    const status = item.ok ? "PASS" : item.manual ? "SIGN-OFF" : "FAIL";
-    lines.push(`  [${status}] (${item.category}) ${item.name} — ${item.detail}`);
+/**
+ * Detects duplicates deterministically. Exact matches on the canonical key
+ * block submission; near matches (same key fields but differing only by
+ * punctuation or a single edit) enter review. False positives are avoided by
+ * requiring every canonical field to be present and non-empty.
+ */
+export function detectDuplicates(
+  candidates: DuplicateCandidate[],
+  existing: DuplicateCandidate[],
+  key: DuplicateKey = DEFAULT_DUPLICATE_KEY,
+): DuplicateReport {
+  const blocking: DuplicateMatch[] = [];
+  const review: DuplicateMatch[] = [];
+  const clean: DuplicateMatch[] = [];
+
+  const existingByKey = new Map<string, DuplicateCandidate>();
+  for (const record of existing) {
+    const k = canonicalKey(record, key);
+    if (k !== null && !existingByKey.has(k)) existingByKey.set(k, record);
   }
-  lines.push("");
-  if (report.exceptionApplied) {
-    lines.push("Urgent-fix exception applied; manual sign-off deferred to post-release review.");
+
+  for (const candidate of candidates) {
+    const k = canonicalKey(candidate, key);
+    if (k === null) {
+      clean.push({
+        candidate,
+        existing: null,
+        severity: "none",
+        reason: "canonical fields incomplete; skipped duplicate check",
+        matchedFields: [],
+      });
+      continue;
+    }
+
+    const exact = existingByKey.get(k);
+    if (exact) {
+      blocking.push({
+        candidate,
+        existing: exact,
+        severity: "exact",
+        reason: `exact duplicate on ${key.fields.join(", ")}`,
+        matchedFields: key.fields,
+      });
+      continue;
+    }
+
+    const near = findNearDuplicate(candidate, existing, key);
+    if (near) {
+      review.push({
+        candidate,
+        existing: near.record,
+        severity: "near",
+        reason: near.reason,
+        matchedFields: near.matchedFields,
+      });
+      continue;
+    }
+
+    clean.push({
+      candidate,
+      existing: null,
+      severity: "none",
+      reason: "no duplicate found",
+      matchedFields: [],
+    });
   }
-  lines.push(report.ok ? "Release readiness: OK" : "Release readiness: BLOCKED");
-  return lines.join("\n");
+
+  return {
+    blocking,
+    review,
+    clean,
+    ok: blocking.length === 0,
+  };
+}
+
+function findNearDuplicate(
+  candidate: DuplicateCandidate,
+  existing: DuplicateCandidate[],
+  key: DuplicateKey,
+): { record: DuplicateCandidate; reason: string; matchedFields: string[] } | null {
+  const candidateParts = key.fields.map((f) => key.normalize(String(candidate.values[f] ?? "")));
+  for (const record of existing) {
+    const recordParts = key.fields.map((f) => key.normalize(String(record.values[f] ?? "")));
+    const matchedFields: string[] = [];
+    let allClose = true;
+    for (let i = 0; i < key.fields.length; i++) {
+      if (candidateParts[i] === recordParts[i]) {
+        matchedFields.push(key.fields[i]);
+        continue;
+      }
+      if (isNearMatch(candidateParts[i], recordParts[i])) {
+        matchedFields.push(key.fields[i]);
+        continue;
+      }
+      allClose = false;
+      break;
+    }
+    if (allClose && matchedFields.length === key.fields.length) {
+      return {
+        record,
+        reason: `near duplicate on ${key.fields.join(", ")} (edit distance <= 1)`,
+        matchedFields,
+      };
+    }
+  }
+  return null;
+}
+
+function isNearMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let edits = 0;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    edits++;
+    if (edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  if (i < a.length || j < b.length) edits++;
+  return edits <= 1;
+}
+
+/**
+ * Applies a maintainer's review decision to a duplicate report. Allowed
+ * near-duplicates are removed from the review queue; rejected ones are moved
+ * to blocking so the submission is refused.
+ */
+export function resolveDuplicateReview(
+  report: DuplicateReport,
+  resolution: DuplicateReviewResolution,
+): DuplicateReport {
+  const review = report.review.filter((m) => m.candidate.id !== resolution.candidateId);
+  const blocking = [...report.blocking];
+  if (resolution.decision === "reject") {
+    const rejected = report.review.find((m) => m.candidate.id === resolution.candidateId);
+    if (rejected) {
+      blocking.push({
+        ...rejected,
+        severity: "exact",
+        reason: `rejected by ${resolution.reviewer}: ${resolution.note ?? "maintainer review"}`,
+      });
+    }
+  }
+  return {
+    blocking,
+    review,
+    clean: report.clean,
+    ok: blocking.length === 0,
+  };
 }
 
 export function formatPreview(preview: MigrationPreview): string {
@@ -691,5 +779,38 @@ export function formatPostChecks(report: PostCheckReport): string {
   }
   lines.push("");
   lines.push(report.ok ? "All post-checks passed." : `${report.failures.length} post-check(s) failed.`);
+  return lines.join("\n");
+}
+
+export function formatDuplicateReport(report: DuplicateReport): string {
+  const lines: string[] = [];
+  lines.push("Duplicate detection report");
+  lines.push("==========================");
+  lines.push(`Blocking (exact): ${report.blocking.length}`);
+  lines.push(`Review (near):    ${report.review.length}`);
+  lines.push(`Clean:            ${report.clean.length}`);
+  lines.push("");
+
+  if (report.blocking.length > 0) {
+    lines.push("Blocking duplicates:");
+    for (const match of report.blocking) {
+      lines.push(`  ! ${match.candidate.id} — ${match.reason}`);
+    }
+    lines.push("");
+  }
+
+  if (report.review.length > 0) {
+    lines.push("Ambiguous duplicates (maintainer review required):");
+    for (const match of report.review) {
+      lines.push(`  ? ${match.candidate.id} — ${match.reason}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(
+    report.ok
+      ? "No blocking duplicates; safe to proceed."
+      : `${report.blocking.length} blocking duplicate(s) must be resolved.`,
+  );
   return lines.join("\n");
 }

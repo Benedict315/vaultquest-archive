@@ -1,4 +1,4 @@
-/**
+/*
  * Migration safety CLI (#790).
  *
  *   tsx src/scripts/migrationSafety.ts --preview <migration-id>
@@ -10,8 +10,8 @@
  * statements would touch — before anything is written.
  *
  * Exit codes:
- *   0  – preview produced, or all post-checks passed
- *   1  – a post-check failed, or the migration could not be read
+ *   0 – preview produced, or all post-checks passed
+ *   1 – a post-check failed, or the migration could not be read
  */
 
 import * as path from "path";
