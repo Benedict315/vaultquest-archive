@@ -52,7 +52,6 @@ import { OperationalHealthService } from "./services/operationalHealthService.js
 import { operationalHealthRoutes } from "./routes/operationalHealth.js";
 import { TrendAggregationService } from "./services/trendAggregationService.js";
 import { trendAggregationRoutes } from "./routes/trendAggregation.js";
-import { IdempotencyService } from "./services/idempotencyService.js";
 
 export type AppDeps = {
   prisma: PrismaClient;

@@ -49,8 +49,7 @@ vaultquest/
     ├── data-fetching.md       # Client-side data fetching and hooks conventions
     ├── REJECTION_REASONS.md   # VaultQuest rejection reason codes and user-facing explanations
     ├── SESSION_CONTINUITY.md  # Cross-device session continuity and conflict handling
-    ├── HISTORICAL_TRENDS.md  # Historical trend aggregation for maintainer analytics
-    └── IDEMPOTENCY.md        # Idempotency and replay protection for high-risk writes
+    └── HISTORICAL_TRENDS.md  # Historical trend aggregation for maintainer analytics
 ```
 
 Each top-level package has its own `README.md` with stack details and a setup
@@ -258,19 +257,7 @@ VaultQuest provides historical trend aggregation for maintainer analytics. When 
 
 See `docs/HISTORICAL_TRENDS.md` for available metrics, API endpoints, and privacy guarantees.
 
-## 12. Idempotency and replay protection
-
-VaultQuest provides idempotency and replay protection for high-risk write operations. When implementing write operations:
-
-- Use `IdempotencyService` for operations that can be retried (clients, workers, webhooks, wallets)
-- Idempotency keys are UUIDs (client-generated) or deterministic (server-generated)
-- Default TTL is 24 hours, configurable between 1 minute and 30 days
-- Cached responses ensure consistent results for duplicate requests
-- Expired keys are automatically cleaned up and can be reused
-
-See `docs/IDEMPOTENCY.md` for operation types, API integration, and key lifecycle.
-
-## 13. Getting help
+## 12. Getting help
 
 - **Stuck on an issue?** Comment in the issue thread — tag the assignor.
 - **Found a security problem?** Email the maintainer privately rather than

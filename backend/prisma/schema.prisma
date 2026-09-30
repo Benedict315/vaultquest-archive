@@ -509,23 +509,3 @@ model TrendAggregate {
   @@index([windowStart, windowEnd])
   @@map("trend_aggregates")
 }
-
-// Idempotency keys for replay protection on high-risk write operations
-model IdempotencyKey {
-  id             String   @id @default(uuid()) @db.Uuid
-  key            String   @unique
-  operationType  String   @map("operation_type")
-  walletAddress  String?  @map("wallet_address")
-  status         String   @default("pending") // "pending", "completed", "failed", "expired"
-  response       Json?    @map("response")
-  errorCode      String?  @map("error_code")
-  errorDetail    String?  @map("error_detail")
-  expiresAt      DateTime @map("expires_at")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
-
-  @@index([walletAddress, expiresAt])
-  @@index([expiresAt])
-  @@index([operationType, expiresAt])
-  @@map("idempotency_keys")
-}
