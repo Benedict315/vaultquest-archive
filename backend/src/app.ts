@@ -47,6 +47,8 @@ import { exportsRoutes } from "./routes/exports.js";
 import { importsRoutes } from "./routes/imports.js";
 import { OperationalHealthService } from "./services/operationalHealthService.js";
 import { operationalHealthRoutes } from "./routes/operationalHealth.js";
+import { activityRoutes } from "./routes/activity.js";
+import { PublicActivityService } from "./services/publicActivity.js";
 
 export type AppDeps = {
   prisma: PrismaClient;
@@ -229,9 +231,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   );
   const dashboardAggregateSvc = new DashboardAggregateService(deps.prisma);
   const operationalHealthSvc = new OperationalHealthService(deps.prisma);
+  const publicActivitySvc = new PublicActivityService(deps.prisma);
 
   // Register routes (healthRoutes already includes /health endpoint)
   app.register(actionsRoutes(svc, apiKeyGuard));
+  app.register(activityRoutes(publicActivitySvc, requirePermission("own.data.read", [walletPrincipal])));
   app.register(walletAuthRoutes(walletAuthSvc));
   app.register(healthRoutes(svc));
   app.register(savedPoolsRoutes(savedPoolsSvc));
