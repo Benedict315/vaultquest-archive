@@ -26,6 +26,7 @@ describe("sweepOrphans", () => {
     const refreshed = await db.prisma.actionLedger.findUnique({ where: { id: oldRow.id } });
     expect(refreshed?.status).toBe("orphaned");
     expect(refreshed?.errorCode).toBe("ORPHAN_TTL_EXPIRED");
+    expect((refreshed?.recoveryCheckpoint as { stage: string }).stage).toBe("recovery_required");
 
     const stillSubmitted = await db.prisma.actionLedger.findUnique({ where: { id: fresh.id } });
     expect(stillSubmitted?.status).toBe("submitted");
@@ -42,6 +43,45 @@ describe("sweepOrphans", () => {
     expect(result.orphaned).toBe(0);
   });
 
+  it("does not orphan submitted actions with an active worker lease", async () => {
+    const action = await seedAction(db.prisma, { status: "submitted", txHash: "tx_active_lease" });
+    await db.prisma.actionLedger.update({
+      where: { id: action.id },
+      data: { updatedAt: new Date(Date.now() - 60 * 60 * 1000) }
+    });
+    await db.prisma.actionLease.create({
+      data: {
+        actionId: action.id,
+        workerId: "active-worker",
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+    });
+
+    const result = await sweepOrphans(db.prisma, { ttlMinutes: 10 });
+    const unchanged = await db.prisma.actionLedger.findUnique({ where: { id: action.id } });
+
+    expect(result.orphaned).toBe(0);
+    expect(unchanged?.status).toBe("submitted");
+  });
+
+  it("marks a stale wallet operation as requiring recovery without resubmitting it", async () => {
+    const action = await seedAction(db.prisma, { status: "pending" });
+    await db.prisma.actionLedger.update({
+      where: { id: action.id },
+      data: {
+        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+        recoveryCheckpoint: { stage: "external_action_started", checkpointed_at: new Date().toISOString() }
+      }
+    });
+
+    const result = await sweepOrphans(db.prisma, { ttlMinutes: 10 });
+    const recovered = await db.prisma.actionLedger.findUnique({ where: { id: action.id } });
+
+    expect(result.recoveryRequired).toBe(1);
+    expect(recovered?.status).toBe("pending");
+    expect((recovered?.recoveryCheckpoint as { stage: string }).stage).toBe("recovery_required");
+  });
+
   it("deletes pending_events older than 1 hour with no match", async () => {
     await db.prisma.pendingEvent.create({
       data: {
@@ -56,6 +96,24 @@ describe("sweepOrphans", () => {
     expect(result.prunedEvents).toBe(1);
     const found = await db.prisma.pendingEvent.findUnique({ where: { txHash: "tx_stale" } });
     expect(found).toBeNull();
+  });
+
+  it("retains stale pending events referenced by unresolved actions", async () => {
+    await seedAction(db.prisma, { status: "submitted", txHash: "tx_unresolved_event" });
+    await db.prisma.pendingEvent.create({
+      data: {
+        txHash: "tx_unresolved_event",
+        sorobanEventId: "evt_unresolved_event",
+        eventPayload: {},
+        statusHint: "confirmed",
+        receivedAt: new Date(Date.now() - 2 * 60 * 60 * 1000)
+      }
+    });
+
+    const result = await sweepOrphans(db.prisma, { ttlMinutes: 10 });
+
+    expect(result.prunedEvents).toBe(0);
+    expect(await db.prisma.pendingEvent.findUnique({ where: { txHash: "tx_unresolved_event" } })).not.toBeNull();
   });
 });
 

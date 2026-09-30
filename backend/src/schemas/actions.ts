@@ -19,6 +19,10 @@ export const cancelBody = z.object({
   error_detail: z.string().max(1000).optional()
 });
 
+export const actionCheckpointBody = z.object({
+  stage: z.literal("external_action_started")
+});
+
 export const listQuery = z.object({
   wallet: walletSchema,
   status: z.enum(ACTION_STATUSES).optional(),

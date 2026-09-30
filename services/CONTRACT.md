@@ -19,9 +19,11 @@ behavior — not just the shared package's own unit tests:
   (runs via `pnpm test:conformance` / `.github/workflows/conformance.yml`, which
   is triggered on changes to `services/**` and `lib/conformance-spec.ts`).
 
-The canonical source of the numeric/edge-case rules is
-[`lib/conformance-spec.ts`](../lib/conformance-spec.ts), mirrored from
-`contracts/drip-pool/src/lib.rs`.
+The canonical contract-compatible defaults are evaluated by
+[`lib/business-policy.ts`](../lib/business-policy.ts) and mirrored by
+[`lib/conformance-spec.ts`](../lib/conformance-spec.ts) from
+`contracts/drip-pool/src/lib.rs`. Consumer-specific limits are injected into
+`BusinessPolicyEngine`; see [`docs/BUSINESS_POLICY.md`](../docs/BUSINESS_POLICY.md).
 
 ---
 
@@ -50,6 +52,10 @@ The canonical source of the numeric/edge-case rules is
   `currentBalance` by `amount`, increments `streakDays` by 1, marks a milestone
   complete once `currentBalance >= milestone.targetAmount`, and sets
   `isEligibleForReward = currentBalance > 0`.
+- **SAV-8 — Configurable limits are checked before mutation.** A `SavingsService`
+  created with a `maximumDeposit` rejects amounts above that limit with a
+  `BusinessPolicyError` carrying a stable code and user-safe message; the
+  default service retains the contract's existing unbounded positive amount.
 
 ## `questService.ts`
 

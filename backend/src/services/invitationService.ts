@@ -25,6 +25,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { AuditRecorder } from "./auditTrail.js";
 
 export const INVITATION_ROLES = ["viewer", "contributor", "admin"] as const;
 export type InvitationRole = (typeof INVITATION_ROLES)[number];
@@ -194,6 +195,8 @@ export interface InvitationServiceOptions {
   now?: () => number;
   idFactory?: () => string;
   tokenFactory?: () => string;
+  /** #814: every grant/accept/revoke/expiry is written to the audit trail. */
+  audit?: AuditRecorder;
 }
 
 export class InvitationService {
@@ -202,6 +205,7 @@ export class InvitationService {
   private readonly now: () => number;
   private readonly idFactory: () => string;
   private readonly tokenFactory: () => string;
+  private readonly audit?: AuditRecorder;
 
   constructor(options: InvitationServiceOptions) {
     this.store = options.store;
@@ -209,6 +213,34 @@ export class InvitationService {
     this.now = options.now ?? (() => Date.now());
     this.idFactory = options.idFactory ?? (() => `inv_${randomBytes(8).toString("hex")}`);
     this.tokenFactory = options.tokenFactory ?? (() => randomBytes(24).toString("base64url"));
+    this.audit = options.audit;
+  }
+
+  /**
+   * #814: invitations grant vault access and roles, so each state change is
+   * audited. The token (even its hash) is never written; the audit trail's
+   * sanitizer would redact it anyway.
+   */
+  private async auditChange(
+    action: "invitation.create" | "invitation.accept" | "invitation.revoke" | "invitation.expire",
+    actor: string,
+    before: Invitation | null,
+    after: Invitation,
+    reason?: string,
+  ): Promise<void> {
+    if (!this.audit) return;
+    const view = (i: Invitation | null) =>
+      i && { vaultId: i.vaultId, inviterId: i.inviterId, inviteeId: i.inviteeId, role: i.role, state: i.state, expiresAt: i.expiresAt };
+    await this.audit.record({
+      category: "access",
+      action,
+      actor: { subject: actor, role: actor === "system" ? "system" : "user" },
+      target: { type: "invitation", id: after.id },
+      reason: reason ?? null,
+      before: view(before),
+      after: view(after),
+      metadata: { vaultId: after.vaultId },
+    });
   }
 
   /**
@@ -275,6 +307,7 @@ export class InvitationService {
     };
 
     await this.store.insert(invitation);
+    await this.auditChange("invitation.create", invitation.inviterId, null, invitation, input.reason);
     return { invitation, token };
   }
 
@@ -303,10 +336,11 @@ export class InvitationService {
     }
     if (this.isExpired(found, params.now)) {
       // Persist the terminal state so the row stops reading as PENDING.
-      await this.store.update(found.id, {
+      const expired = await this.store.update(found.id, {
         state: "EXPIRED",
         rejectionReason: "expired before acceptance",
       });
+      if (expired) await this.auditChange("invitation.expire", "system", found, expired, "expired before acceptance");
       throw new InvitationError("EXPIRED", "Invitation has expired");
     }
 
@@ -315,6 +349,7 @@ export class InvitationService {
       acceptedAt: new Date(params.now ?? this.now()).toISOString(),
     });
     if (!updated) throw new InvitationError("NOT_FOUND", "Invitation not found");
+    await this.auditChange("invitation.accept", inviteeId, found, updated);
     return updated;
   }
 
@@ -334,6 +369,7 @@ export class InvitationService {
       revokedAt: new Date(this.now()).toISOString(),
     });
     if (!updated) throw new InvitationError("NOT_FOUND", "Invitation not found");
+    await this.auditChange("invitation.revoke", params.actorId, found, updated);
     return updated;
   }
 
@@ -350,7 +386,10 @@ export class InvitationService {
         state: "EXPIRED",
         rejectionReason: "expired",
       });
-      if (updated) expired.push(updated);
+      if (updated) {
+        await this.auditChange("invitation.expire", "system", row, updated, "expired");
+        expired.push(updated);
+      }
     }
     return expired;
   }
