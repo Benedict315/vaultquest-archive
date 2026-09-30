@@ -54,6 +54,18 @@ export class OperationalHealthService {
       });
     }
 
+    const abandonedPendingCount = await this.countAbandonedPendingActions();
+    if (abandonedPendingCount > 0) {
+      indicators.push({
+        category: "Abandoned Pending Actions",
+        status: abandonedPendingCount > 10 ? "critical" : "warning",
+        count: abandonedPendingCount,
+        description: `${abandonedPendingCount} wallet actions have remained pending for more than 15 minutes`,
+        actionable: "Inspect recovery checkpoints; resume only actions that have not started an external wallet operation, and verify wallet activity for all others",
+        investigationLink: `SELECT id, wallet_address, action_type, recovery_checkpoint, created_at, updated_at FROM action_ledger WHERE status = 'pending' AND updated_at < NOW() - INTERVAL '15 minutes' ORDER BY updated_at ASC LIMIT 20`,
+      });
+    }
+
     // 2. Stale Pending Events (indexer backlog)
     const stalePendingCount = await this.countStalePendingEvents();
     if (stalePendingCount > 0) {
@@ -200,6 +212,15 @@ export class OperationalHealthService {
     return result;
   }
 
+  private async countAbandonedPendingActions(): Promise<number> {
+    return this.prisma.actionLedger.count({
+      where: {
+        status: "pending",
+        updatedAt: { lt: new Date(Date.now() - 15 * 60 * 1000) }
+      }
+    });
+  }
+
   private async countStalePendingEvents(): Promise<number> {
     const result = await this.prisma.pendingEvent.count({
       where: {
@@ -305,6 +326,26 @@ export class OperationalHealthService {
         total = await this.prisma.actionLedger.count({
           where: { status: "orphaned" },
         });
+        break;
+
+      case "Abandoned Pending Actions":
+        items = await this.prisma.actionLedger.findMany({
+          where: {
+            status: "pending",
+            updatedAt: { lt: new Date(Date.now() - 15 * 60 * 1000) },
+          },
+          select: {
+            id: true,
+            walletAddress: true,
+            actionType: true,
+            recoveryCheckpoint: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+          orderBy: { updatedAt: "asc" },
+          take: 50,
+        });
+        total = await this.countAbandonedPendingActions();
         break;
 
       case "Stale Pending Events":

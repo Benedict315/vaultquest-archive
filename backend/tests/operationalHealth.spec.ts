@@ -32,7 +32,7 @@ describe("OperationalHealthService", () => {
     });
 
     it("detects orphaned actions as warning", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(5);
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 5 : 0);
 
       const report = await service.generateHealthReport();
 
@@ -43,8 +43,18 @@ describe("OperationalHealthService", () => {
       expect(report.overallStatus).toBe("warning");
     });
 
+    it("reports abandoned pending actions separately", async () => {
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "pending" ? 4 : 0);
+
+      const report = await service.generateHealthReport();
+      const indicator = report.indicators.find((item) => item.category === "Abandoned Pending Actions");
+
+      expect(indicator?.count).toBe(4);
+      expect(indicator?.actionable).toContain("wallet operation");
+    });
+
     it("escalates orphaned actions to critical when > 10", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(15);
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 15 : 0);
 
       const report = await service.generateHealthReport();
 
@@ -195,7 +205,7 @@ describe("OperationalHealthService", () => {
     });
 
     it("includes investigation links for each indicator", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(3);
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 3 : 0);
 
       const report = await service.generateHealthReport();
 
@@ -206,7 +216,7 @@ describe("OperationalHealthService", () => {
     });
 
     it("includes actionable guidance for each indicator", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(2);
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 2 : 0);
 
       const report = await service.generateHealthReport();
 
@@ -216,7 +226,7 @@ describe("OperationalHealthService", () => {
     });
 
     it("aggregates multiple indicators correctly", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(5);
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 5 : 0);
       mockPrisma.pendingEvent.count.mockResolvedValue(3);
       mockPrisma.backgroundJob.count.mockResolvedValue(1);
 
@@ -229,7 +239,7 @@ describe("OperationalHealthService", () => {
     });
 
     it("reports critical when any indicator is critical", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(15); // > 10, critical
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 15 : 0); // > 10, critical
       mockPrisma.pendingEvent.count.mockResolvedValue(3); // warning
 
       const report = await service.generateHealthReport();
@@ -337,7 +347,7 @@ describe("OperationalHealthService", () => {
 
   describe("Count accuracy", () => {
     it("calls correct count query for orphaned actions", async () => {
-      mockPrisma.actionLedger.count.mockResolvedValue(5);
+      mockPrisma.actionLedger.count.mockImplementation(async ({ where }: any) => where.status === "orphaned" ? 5 : 0);
 
       await service.generateHealthReport();
 

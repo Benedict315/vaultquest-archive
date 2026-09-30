@@ -58,6 +58,7 @@ Performance improvements, index additions, and query optimizations.
 | Migration                               | Description                                 |
 | --------------------------------------- | ------------------------------------------- |
 | `20260627000000_optimize_query_indexes` | Add indexes for frequently-filtered columns |
+| `20260930000000_add_action_recovery_checkpoints` | Persist action recovery checkpoints |
 
 **Indexes Added:**
 
