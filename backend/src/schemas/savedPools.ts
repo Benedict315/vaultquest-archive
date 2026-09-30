@@ -19,7 +19,8 @@ export const savedPoolRecord = z.object({
 
 export const savedPoolUpsertBody = z.object({
   wallet_address: z.string().min(1).max(120),
-  pool: savedPoolRecord
+  pool: savedPoolRecord,
+  idempotency_key: z.string().uuid().optional()
 });
 
 export const savedPoolListQuery = z.object({

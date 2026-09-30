@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { IdempotencyService } from "./idempotencyService.js";
 
 /**
  * Persists user-saved vault/pool references for quick access and watchlists.
@@ -43,6 +44,7 @@ export interface SavedPoolInput {
     locksAt: Date | null;
     drawsAt: Date | null;
   };
+  idempotencyKey?: string;
 }
 
 export interface SavedPoolRecord {
@@ -74,8 +76,16 @@ export type ListSavedPoolsResult = {
 export class SavedPoolsService {
   /**
    * @param prisma - Prisma client for database access
+   * @param cacheService - Optional cache service
+   * @param categoriesCacheTtlSeconds - Optional cache TTL
+   * @param idempotencyService - Idempotency service for replay protection
    */
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly cacheService?: unknown,
+    private readonly categoriesCacheTtlSeconds?: number,
+    private readonly idempotencyService?: IdempotencyService
+  ) {}
 
   /**
    * Saves a pool reference for a wallet if not already saved.
@@ -85,6 +95,25 @@ export class SavedPoolsService {
    * @returns The saved record and whether it was newly created
    */
   async savePool(input: SavedPoolInput): Promise<{ record: SavedPoolRecord; created: boolean }> {
+    // Use idempotency if key is provided
+    if (input.idempotencyKey && this.idempotencyService) {
+      return this.idempotencyService.executeWithIdempotency(
+        {
+          key: input.idempotencyKey,
+          operationType: "saved_pool",
+          walletAddress: input.walletAddress,
+        },
+        () => this.savePoolImpl(input)
+      );
+    }
+
+    return this.savePoolImpl(input);
+  }
+
+  /**
+   * Internal implementation of savePool without idempotency
+   */
+  private async savePoolImpl(input: SavedPoolInput): Promise<{ record: SavedPoolRecord; created: boolean }> {
     const existing = await this.prisma.savedPool.findUnique({
       where: {
         walletAddress_poolId: {
