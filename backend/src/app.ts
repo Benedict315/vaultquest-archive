@@ -1,3 +1,6 @@
+import { SearchIndexService } from "./services/search/searchIndexService.js";
+import { SearchIndexRepairService } from "./services/search/searchIndexRepairService.js";
+import { searchRoutes } from "./routes/search.js";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import rateLimit from "@fastify/rate-limit";
@@ -67,6 +70,8 @@ export type AppDeps = {
    */
   jobStore?: JobStore;
   jobWorkerPollIntervalMs?: number;
+  searchIndexService?: SearchIndexService;
+  searchIndexRepairService?: SearchIndexRepairService;
 };
 
 declare module "fastify" {
@@ -74,6 +79,8 @@ declare module "fastify" {
     /** Present only when `jobStore` was provided; call `.start()` to begin polling. */
     jobWorker?: JobWorker;
     jobQueue?: JobQueue;
+    searchIndexService?: SearchIndexService;
+    searchIndexRepairService?: SearchIndexRepairService;
   }
 }
 
@@ -264,6 +271,23 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   );
   app.register(dashboardAggregatesRoutes(dashboardAggregateSvc, apiKeyGuard));
 
+  // Permission-aware search indexing & repair (#802)
+  const searchIndexSvc =
+    deps.searchIndexService || new SearchIndexService();
+  const searchRepairSvc =
+    deps.searchIndexRepairService ||
+    new SearchIndexRepairService(deps.prisma, searchIndexSvc, loggerInstance);
+  app.decorate("searchIndexService", searchIndexSvc);
+  app.decorate("searchIndexRepairService", searchRepairSvc);
+  app.register(
+    searchRoutes(
+      searchIndexSvc,
+      searchRepairSvc,
+      [walletPrincipal],
+      requirePermission("admin.audit.write", [walletPrincipal]),
+    ),
+  );
+
   // Wallet-scoped data portability (#772, #773). Authorization is enforced by
   // the permission guards and by the services' own wallet-scope checks.
   const exportSvc = new DataExportService({
@@ -290,3 +314,4 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   return app;
 }
+
