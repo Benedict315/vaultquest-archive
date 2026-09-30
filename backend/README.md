@@ -23,6 +23,38 @@ pnpm test
 pnpm dev
 ```
 
+## Contributor diagnostics
+
+Before you start working on VaultQuest -- and any time your local setup stops behaving -- run the diagnostics command:
+
+```bash
+pnpm run doctor
+```
+
+It checks the complete local contributor environment in one pass and prints a pass/fail report with actionable remediation text for every failure.
+
+What it verifies:
+
+| Area | Check |
+|---|---|
+| Tooling | Node 20+, pnpm, Docker daemon reachable via `pnpm run doctor` |
+| Dependencies | `node_modules` installed and Prisma client generated |
+| Configuration | `.env` present and validated against the Zod boot schema |
+| Database | Postgres 16 connectivity, migration status, and seed fixtures |
+| Integration mocks | Local event-indexer and wallet-rpc mocks configured and responsive |
+| Test fixtures | Required fixture files present and parseable |
+
+The command is read-only against your database: migration and seed checks use `introspection `/ `SELECT` queries only. It never runs migrations, seeds, or writes, and it never touches production data. By default it targets the local `.env` configuration; pass `--env <path>` to check a different file.
+
+Run it:
+
+- After cloning and `cp .env.example .env`, before your first `dn:setup`.
+- After changing anything in `.env` or the Prisma schema.
+- Before opening a pull request, to confirm your local environment matches the expected stack.
+- Whenever a test fails for reasons that look environmental rather than logical.
+
+Exit code is `0` when every check passes and non-zero when any check fails, so it is safe to wire into CI or a pre-commit hook.
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -31,10 +63,10 @@ pnpm dev
 | POST | /actions | Create intent (requires `Idempotency-Key: <uuid>`) |
 | PATCH | /actions/:id/submitted | Attach `tx_hash` after wallet broadcasts |
 | POST | /actions/:id/cancel | Mark a pending intent failed |
-| GET  | /actions/:id | Read a single action |
-| GET  | /actions?wallet=G...&status=&cursor=&limit= | Paginated activity history |
-| GET  | /dashboard/summary?wallet=G...&stale_after_ms= | Per-wallet rollup for the dashboard (#14) |
-| GET  | /saved-pools?wallet=G... | Saved-pools watchlist entries |
+| GET | /actions/:id | Read a single action |
+| GET | /actions?wallet=G...&status=&cursor=&limit= | Paginated activity history |
+| GET | /dashboard/summary?wallet=G...&stale_after_ms= | Per-wallet rollup for the dashboard (#14) |
+| GET | /saved-pools?wallet=G... | Saved-pools watchlist entries |
 | POST | /saved-pools | Save or update a pool watchlist entry |
 | DELETE | /saved-pools/:poolId?wallet=G... | Remove a saved pool from a wallet watchlist |
 | DELETE | /actions?wallet=G... | Privacy scrub (nulls payload, sets redacted_at) |
@@ -59,4 +91,10 @@ Tests use Testcontainers to spin up Postgres 16 per run. Docker must be availabl
 
 ```bash
 pnpm test
+```
+
+The diagnostics command is covered by `tests/doctor.spec.ts`, which exercises each check against known-good and known-bad fixtures:
+
+```bash
+pnpm test -- tests/doctor.spec.ts
 ```
