@@ -171,31 +171,32 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // Structured Logging for incoming requests and performance duration
   app.addHook("onRequest", async (req, reply) => {
     (req.raw as any).tempStartTime = performance.now();
+    const route = req.routeOptions?.url ?? "unmatched";
     req.log.info(
       {
         event: "request_incoming",
         method: req.method,
-        url: req.url,
+        url: route,
         correlation_id: req.correlationId,
-        ip: req.ip,
       },
-      `Incoming request: ${req.method} ${req.url}`,
+      "Incoming request",
     );
   });
 
   app.addHook("onResponse", async (req, reply) => {
     const startTime = (req.raw as any).tempStartTime || performance.now();
     const duration = performance.now() - startTime;
+    const route = req.routeOptions?.url ?? "unmatched";
     req.log.info(
       {
         event: "request_completed",
         method: req.method,
-        url: req.url,
+        url: route,
         correlation_id: req.correlationId,
         status_code: reply.statusCode,
         duration_ms: Math.round(duration * 100) / 100,
       },
-      `Request completed: ${req.method} ${req.url} -> ${reply.statusCode} (${duration.toFixed(2)}ms)`,
+      "Request completed",
     );
   });
 
