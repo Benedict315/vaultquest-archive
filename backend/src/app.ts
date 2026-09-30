@@ -1,3 +1,6 @@
+import { SearchIndexService } from "./services/search/searchIndexService.js";
+import { SearchIndexRepairService } from "./services/search/searchIndexRepairService.js";
+import { searchRoutes } from "./routes/search.js";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import rateLimit from "@fastify/rate-limit";
@@ -47,6 +50,8 @@ import { exportsRoutes } from "./routes/exports.js";
 import { importsRoutes } from "./routes/imports.js";
 import { OperationalHealthService } from "./services/operationalHealthService.js";
 import { operationalHealthRoutes } from "./routes/operationalHealth.js";
+import { activityRoutes } from "./routes/activity.js";
+import { PublicActivityService } from "./services/publicActivity.js";
 
 export type AppDeps = {
   prisma: PrismaClient;
@@ -67,6 +72,8 @@ export type AppDeps = {
    */
   jobStore?: JobStore;
   jobWorkerPollIntervalMs?: number;
+  searchIndexService?: SearchIndexService;
+  searchIndexRepairService?: SearchIndexRepairService;
 };
 
 declare module "fastify" {
@@ -74,6 +81,8 @@ declare module "fastify" {
     /** Present only when `jobStore` was provided; call `.start()` to begin polling. */
     jobWorker?: JobWorker;
     jobQueue?: JobQueue;
+    searchIndexService?: SearchIndexService;
+    searchIndexRepairService?: SearchIndexRepairService;
   }
 }
 
@@ -229,9 +238,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   );
   const dashboardAggregateSvc = new DashboardAggregateService(deps.prisma);
   const operationalHealthSvc = new OperationalHealthService(deps.prisma);
+  const publicActivitySvc = new PublicActivityService(deps.prisma);
 
   // Register routes (healthRoutes already includes /health endpoint)
   app.register(actionsRoutes(svc, apiKeyGuard));
+  app.register(activityRoutes(publicActivitySvc, requirePermission("own.data.read", [walletPrincipal])));
   app.register(walletAuthRoutes(walletAuthSvc));
   app.register(healthRoutes(svc));
   app.register(savedPoolsRoutes(savedPoolsSvc));
@@ -264,6 +275,23 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   );
   app.register(dashboardAggregatesRoutes(dashboardAggregateSvc, apiKeyGuard));
 
+  // Permission-aware search indexing & repair (#802)
+  const searchIndexSvc =
+    deps.searchIndexService || new SearchIndexService();
+  const searchRepairSvc =
+    deps.searchIndexRepairService ||
+    new SearchIndexRepairService(deps.prisma, searchIndexSvc, loggerInstance);
+  app.decorate("searchIndexService", searchIndexSvc);
+  app.decorate("searchIndexRepairService", searchRepairSvc);
+  app.register(
+    searchRoutes(
+      searchIndexSvc,
+      searchRepairSvc,
+      [walletPrincipal],
+      requirePermission("admin.audit.write", [walletPrincipal]),
+    ),
+  );
+
   // Wallet-scoped data portability (#772, #773). Authorization is enforced by
   // the permission guards and by the services' own wallet-scope checks.
   const exportSvc = new DataExportService({
@@ -290,3 +318,4 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   return app;
 }
+

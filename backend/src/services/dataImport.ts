@@ -4,7 +4,7 @@ import type { SavedPoolInput, SavedPoolRecord } from "./savedPools.js";
 
 /** Supported import format version (matches the `saved_pools` export section). */
 export const IMPORT_FORMAT_VERSION = "1.0.0";
-export const IMPORT_MAX_ROWS = 1_000;
+export const IMPORT_MAX_ROWS = 1000;
 
 /** Narrow port over SavedPoolsService so dry runs can be proven write-free. */
 export interface ImportTarget {
@@ -97,8 +97,8 @@ function projectRecord(r: SavedPoolRecord) {
 /**
  * Bulk import of a wallet's saved pools (#773).
  *
- * - `pool_id` is the external id: re-running the same import is idempotent
- *   (identical rows are `skip`ped, changed rows `update`d, new rows `create`d).
+ * -  pool_id` is the external id: re-running the same import is idempotent
+ *   (identical rows are `skip`ped, changed rows `update`d’s, new rows `create`d’s).
  * - A dry run classifies every row but performs no writes.
  * - Rows are validated and applied independently; one bad row never blocks or
  *   rolls back the others. The report says exactly what was applied and how
