@@ -47,7 +47,8 @@ vaultquest/
 └── docs/                       # Architecture, state model, testing notes
     ├── ARCHITECTURE.md        # Cross-stack architecture diagram
     ├── data-fetching.md       # Client-side data fetching and hooks conventions
-    └── REJECTION_REASONS.md   # VaultQuest rejection reason codes and user-facing explanations
+    ├── REJECTION_REASONS.md   # VaultQuest rejection reason codes and user-facing explanations
+    └── SESSION_CONTINUITY.md  # Cross-device session continuity and conflict handling
 ```
 
 Each top-level package has its own `README.md` with stack details and a setup
@@ -230,6 +231,18 @@ VaultQuest uses a structured rejection reason system for vault operations (depos
 - Backend error codes for VaultQuest operations are prefixed with `VAULT_` (e.g., `VAULT_LOCKUP_ACTIVE`)
 
 See `docs/REJECTION_REASONS.md` for the complete list of rejection reasons and integration examples.
+
+## 10. Session continuity and conflict handling
+
+VaultQuest implements optimistic concurrency control to prevent silent overwrites when users work across tabs or devices. When implementing editable workflows:
+
+- Use version tokens from `lib/concurrencyControl.ts` for optimistic locking
+- Wrap operations with `executeWithVersionCheck` to detect conflicts
+- Use `useConflictAwareOperation` hook for conflict state management
+- Provide user-facing conflict resolution UI using `ConflictResolutionUI` or `ConflictBanner`
+- Handle `VAULT_CONCURRENT_MODIFICATION` rejection reason with refresh actions
+
+See `docs/SESSION_CONTINUITY.md` for implementation details and usage examples.
 
 ## 11. Getting help
 
