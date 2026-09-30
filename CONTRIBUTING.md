@@ -48,8 +48,7 @@ vaultquest/
     ├── ARCHITECTURE.md        # Cross-stack architecture diagram
     ├── data-fetching.md       # Client-side data fetching and hooks conventions
     ├── REJECTION_REASONS.md   # VaultQuest rejection reason codes and user-facing explanations
-    ├── SESSION_CONTINUITY.md  # Cross-device session continuity and conflict handling
-    └── HISTORICAL_TRENDS.md  # Historical trend aggregation for maintainer analytics
+    └── SESSION_CONTINUITY.md  # Cross-device session continuity and conflict handling
 ```
 
 Each top-level package has its own `README.md` with stack details and a setup
@@ -245,19 +244,19 @@ VaultQuest implements optimistic concurrency control to prevent silent overwrite
 
 See `docs/SESSION_CONTINUITY.md` for implementation details and usage examples.
 
-## 11. Historical trend aggregation
+## 11. Getting help
 
-VaultQuest provides historical trend aggregation for maintainer analytics. When working with trend data:
+VaultQuest uses a structured rejection reason system for vault operations (deposit, withdraw, claim, etc.). When implementing error handling:
 
-- Use `TrendAggregationService` for aggregating metrics over time windows
-- All trend data includes privacy redaction for sensitive fields (wallet addresses, emails, keys)
-- Use deterministic date windows aligned to UTC boundaries for consistent results
-- All trend exports include schema versioning for API contract stability
-- Persisted aggregates can be retrieved via the `/trends/persisted` endpoint
+- Use VaultQuest-specific rejection reasons from `lib/rejectionReasons.ts` for vault operations
+- Map contract behavior errors to rejection reasons using `mapContractErrorToRejection`
+- Map wallet/transaction errors to rejection reasons using `mapWalletErrorToRejection`
+- User-facing messages should come from the rejection explanation catalog, not raw error messages
+- Backend error codes for VaultQuest operations are prefixed with `VAULT_` (e.g., `VAULT_LOCKUP_ACTIVE`)
 
-See `docs/HISTORICAL_TRENDS.md` for available metrics, API endpoints, and privacy guarantees.
+See `docs/REJECTION_REASONS.md` for the complete list of rejection reasons and integration examples.
 
-## 12. Getting help
+## 9. Getting help
 
 - **Stuck on an issue?** Comment in the issue thread — tag the assignor.
 - **Found a security problem?** Email the maintainer privately rather than
